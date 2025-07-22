@@ -46,9 +46,9 @@ def extract_features(
 
         # Construct URL
         url = (
-            f"{config.Feature_URI}/extract_single?model_name={model_name}"
+            f"{config.Feature_URI}/extract_single/"
             if is_single
-            else f"{config.Feature_URI}/extract_batch?model_name={model_name}"
+            else f"{config.Feature_URI}/extract_batch/"
         )
 
         # Process input, convert stream to temporary file
@@ -81,6 +81,16 @@ def extract_features(
                 files.append(
                     ("files" if not is_single else "file", open(temp.name, "rb"))
                 )
+
+        # 打印请求参数
+        print("[extract_features 调试] 请求URL:", url)
+        print("[extract_features 调试] model_name:", model_name)
+        print("[extract_features 调试] files 参数:")
+        for f in files:
+            try:
+                print(f"  字段名: {f[0]}, 文件名: {getattr(f[1], 'name', None)}, 类型: {type(f[1])}")
+            except Exception as e:
+                print(f"  文件信息打印异常: {str(e)}")
 
         # Send request
         response = requests.post(url, files=files)

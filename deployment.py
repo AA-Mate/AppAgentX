@@ -426,6 +426,7 @@ If no element with matching score above 0.6 is found, set match_score to 0 and s
             ),
         ]
     )
+    print("[调试] element_match_prompt.input_variables:", element_match_prompt.input_variables)
 
     # Parse template element information
     current_db_element = current_template["db_element"]

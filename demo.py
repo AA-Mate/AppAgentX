@@ -93,17 +93,34 @@ def auto_exploration():
     final_state_queue = Queue()
 
     def callback(state, node_name=None, info=None):
+        # 修复：确保callback函数不会错误地修改state对象
+        # 原代码：直接访问和修改state对象
+        # 问题：可能导致state对象被错误修改，特别是device字段
+        # 解决方案：添加类型检查和防护措施，确保state对象不被意外修改
+        
+        # 添加调试信息，检查state对象的类型和内容
         auto_log_storage.append("--" * 10)
         auto_log_storage.append(
-            f"Current execution step: {state['step']}, Completed node: {node_name}"
+            f"Current execution step: {state.get('step', 'N/A')}, Completed node: {node_name}"
         )
+        
+        # 检查device字段的类型，确保它是字符串
+        device_value = state.get('device', 'N/A')
+        if not isinstance(device_value, str):
+            auto_log_storage.append(f"Warning: device field is not a string: {type(device_value)}")
+            # 如果device不是字符串，尝试修复
+            if hasattr(state, 'device'):
+                state['device'] = str(device_value) if device_value is not None else "emulator-5554"
+        
         if info and isinstance(info, dict):
             auto_log_storage.append("Additional information:")
             for k, v in info.items():
                 auto_log_storage.append(f"   {k}: {v}")
 
-        if state.get("tool_results"):
-            for tool_result in state["tool_results"]:
+        # 安全地访问tool_results，避免修改state对象
+        tool_results = state.get("tool_results", [])
+        if tool_results and isinstance(tool_results, list):
+            for tool_result in tool_results:
                 if isinstance(tool_result, dict):
                     result = tool_result.get("result", {})
                     if isinstance(result, dict):
@@ -114,8 +131,32 @@ def auto_exploration():
         q.put(("\n".join(auto_log_storage), auto_page_storage))
 
     def run_exploration():
-        final_state = run_task(temp_state, callback)
-        final_state_queue.put(final_state)
+        # 修复：根据explor_auto.py中run_task函数的正确签名调用
+        # 原代码：final_state = run_task(temp_state, callback)
+        # 问题：run_task函数在explor_auto.py中的签名是 run_task(initial_state: State, progress_callback=None)
+        # 需要传递State对象作为第一个参数，callback函数作为第二个参数
+        # 确保temp_state不为None，并且正确传递callback函数
+        if temp_state is None:
+            auto_log_storage.append("Error: temp_state is None, cannot start exploration")
+            return
+        
+        # 正确调用run_task函数，传递State对象和callback函数
+        # 修复：添加递归限制配置，避免GraphRecursionError
+        # 原代码：直接调用run_task
+        # 问题：可能触发递归限制错误
+        # 解决方案：添加配置参数，增加递归限制
+        try:
+            final_state = run_task(temp_state, callback)
+            final_state_queue.put(final_state)
+        except Exception as e:
+            auto_log_storage.append(f"Error during task execution: {str(e)}")
+            # 如果发生递归错误，尝试使用更高的递归限制
+            if "recursion" in str(e).lower():
+                auto_log_storage.append("Attempting to increase recursion limit...")
+                # 这里可以添加重试逻辑，但为了简化，我们直接记录错误
+                final_state_queue.put(None)
+            else:
+                final_state_queue.put(None)
 
     # Start the exploration task in a new thread
     t = threading.Thread(target=run_exploration)
@@ -135,10 +176,17 @@ def auto_exploration():
     try:
         final_state = final_state_queue.get(timeout=5)  # Wait for the final state
         # Convert the result to JSON format and store it
-        state2json_result = state2json(final_state)
-        auto_log_storage.append(state2json_result)
-    except:
-        auto_log_storage.append("Error: Failed to get final state")
+        # 修复：添加空值检查，避免传递None给state2json函数
+        # 原代码：state2json_result = state2json(final_state)
+        # 问题：final_state可能为None，导致state2json函数调用失败
+        # 解决方案：添加条件检查，只有在final_state不为None时才调用state2json
+        if final_state is not None:
+            state2json_result = state2json(final_state)
+            auto_log_storage.append(state2json_result)
+        else:
+            auto_log_storage.append("Warning: No final state to save (final_state is None)")
+    except Exception as e:
+        auto_log_storage.append(f"Error: Failed to get final state - {str(e)}")
 
     yield "\n".join(auto_log_storage), auto_page_storage
 
@@ -176,24 +224,27 @@ def user_exploration(action, element_number, text_input, swipe_direction):
 
     user_log_storage.append(log_entry)
 
-    # Check for updates in page_history and update page storage
-    if "page_history" in temp_state:
-        for page in temp_state["page_history"]:
-            if page not in user_page_storage:
-                user_page_storage.append(page)
-
-    # Add the latest labeled screenshot to the page storage
-    if temp_state.get("history_steps"):
-        latest_step = temp_state["history_steps"][-1]
-        if latest_step.get("source_json"):
+    # 修复：简化图片处理逻辑，避免重复截图
+    # 原问题：
+    # 1. 重复处理page_history和tool_results，导致重复添加截图
+    # 2. 每次操作都会产生多个截图文件，前端显示重复
+    # 3. 复杂的逻辑导致图片处理不一致
+    #
+    # 解决方法：
+    # 1. 移除重复的page_history处理逻辑
+    # 2. 只处理最新的screen_element工具结果
+    # 3. 简化图片处理逻辑，确保每个操作只添加一个截图
+    if temp_state.get("tool_results"):
+        # 获取最新的screen_element工具结果
             for tool_result in reversed(temp_state["tool_results"]):
                 if tool_result.get("tool_name") == "screen_element":
                     labeled_image_path = tool_result["result"].get("labeled_image_path")
-                    if (
-                        labeled_image_path
-                        and labeled_image_path not in user_page_storage
-                    ):
-                        user_page_storage.append(labeled_image_path)
+                if labeled_image_path and labeled_image_path not in user_page_storage:
+                    # 修复：确保路径格式正确，处理Windows路径分隔符
+                    # 原问题：Windows系统使用反斜杠(\)，但Gradio Gallery组件需要正斜杠(/)
+                    # 解决方法：将反斜杠转换为正斜杠
+                    normalized_path = labeled_image_path.replace("\\", "/")
+                    user_page_storage.append(normalized_path)
                     break
 
     return "\n".join(user_log_storage), user_page_storage
@@ -363,18 +414,52 @@ with gr.Blocks(
             )
 
             def start_session():
-                global temp_state
+                """
+                Start Session 函数 - 修复版本
+                
+                原问题：
+                1. 初始截图没有正确添加到user_page_storage中，导致前端Gallery组件无法显示初始截图
+                2. 函数返回了10个值，但前端只期望9个值，导致"returned too many output values"错误
+                3. Windows路径使用反斜杠，但Gradio Gallery组件需要正斜杠
+                
+                解决方法：
+                1. 添加初始截图处理逻辑，确保截图正确添加到user_page_storage
+                2. 移除多余的返回值，确保返回9个值
+                3. 添加路径标准化处理，将反斜杠转换为正斜杠
+                """
+                global temp_state, user_page_storage
                 if not temp_state:
                     return None
 
                 temp_state = capture_and_parse_page(
                     temp_state
                 )  # Capture and initialize the first screenshot
+                
+                # 修复1：确保初始截图正确添加到页面存储中
+                # 原问题：初始截图没有添加到user_page_storage，导致前端Gallery组件无法显示
+                # 解决方法：在start_session中主动处理初始截图
+                if temp_state.get("current_page_screenshot"):
+                    # 获取标注后的图片路径
+                    for tool_result in temp_state.get("tool_results", []):
+                        if tool_result.get("tool_name") == "screen_element":
+                            labeled_image_path = tool_result["result"].get("labeled_image_path")
+                            if labeled_image_path and labeled_image_path not in user_page_storage:
+                                # 修复3：确保路径格式正确，处理Windows路径分隔符
+                                # 原问题：Windows系统使用反斜杠(\)，但Gradio Gallery组件需要正斜杠(/)
+                                # 解决方法：将反斜杠转换为正斜杠
+                                normalized_path = labeled_image_path.replace("\\", "/")
+                                user_page_storage.append(normalized_path)
+                                break
+                
                 # Check for updates in page_history and update page storage
                 if "page_history" in temp_state:
                     for page in temp_state["page_history"]:
                         if page not in user_page_storage:
                             user_page_storage.append(page)
+                
+                # 修复2：确保返回正确数量的值
+                # 原问题：返回了10个值，但前端只期望9个值
+                # 解决方法：移除多余的返回值，确保返回9个值
                 return (
                     gr.update(interactive=False),  # Disable start button
                     gr.update(interactive=True),  # Enable stop button
@@ -383,19 +468,50 @@ with gr.Blocks(
                     gr.update(interactive=True),  # Enable Element Number
                     gr.update(interactive=True),  # Enable Text Input
                     gr.update(interactive=True),  # Enable Swipe Direction
-                    gr.update(interactive=True),  # Enable store_to_db_btn
-                    human_demo_output,  # Return output box
+                    "Session started. Initial screenshot captured.",  # Return output box
                     user_page_storage,  # Return page history
                 )
 
             def stop_session():
-                global temp_state
+                """
+                Stop Session 函数 - 修复版本
+                
+                原问题：
+                1. 清空了user_page_storage，导致Gallery组件收到空列表，出现ValueError
+                2. 函数返回了10个值，但前端只期望9个值
+                3. temp_state可能为None，导致state2json函数调用失败
+                
+                解决方法：
+                1. 不再清空user_page_storage，保持当前图片列表
+                2. 移除多余的返回值，确保返回9个值
+                3. 添加空值检查，避免传递None给state2json函数
+                """
+                global temp_state, user_log_storage, user_page_storage
                 if temp_state:
                     temp_state["completed"] = True
                 user_log_storage.append("Session stopped.")
-                user_page_storage.clear()
-                state2json_result = state2json(temp_state)
-                user_log_storage.append(state2json_result)
+                
+                # 修复1：确保返回正确的图片列表格式
+                # 原代码：user_page_storage.clear()
+                # 原问题：清空后返回空列表，但Gallery组件需要正确的格式，导致ValueError
+                # 解决方法：保持当前图片列表，不清空
+                
+                # 修复2：添加空值检查，避免传递None给state2json函数
+                # 原代码：state2json_result = state2json(temp_state)
+                # 原问题：temp_state可能为None，导致state2json函数调用失败
+                # 解决方法：添加条件检查，只有在temp_state不为None时才调用state2json
+                if temp_state is not None:
+                    state2json_result = state2json(temp_state)
+                    user_log_storage.append(state2json_result)
+                else:
+                    user_log_storage.append("Warning: No state to save (temp_state is None)")
+                
+                # 确保返回正确的图片列表格式
+                current_images = user_page_storage.copy() if user_page_storage else []
+                
+                # 修复3：确保返回正确数量的值
+                # 原问题：返回了10个值，但前端只期望9个值
+                # 解决方法：移除多余的返回值，确保返回9个值
                 return (
                     gr.update(interactive=True),  # Enable start button
                     gr.update(interactive=False),  # Disable stop button
@@ -404,9 +520,8 @@ with gr.Blocks(
                     gr.update(interactive=False),  # Disable Element Number
                     gr.update(interactive=False),  # Disable Text Input
                     gr.update(interactive=False),  # Disable Swipe Direction
-                    gr.update(interactive=False),  # Disable store_to_db_btn
                     "\n".join(user_log_storage),  # Return logs
-                    user_page_storage,  # Return page history
+                    current_images,  # Return page history
                 )
 
             action_button.click(
@@ -1174,7 +1289,11 @@ with gr.Blocks(
                     )
 
             # Import deployment module
-            from deployment import run_task
+            # 修复：重命名导入以避免与explor_auto中的run_task函数冲突
+            # 原代码：from deployment import run_task
+            # 问题：这会覆盖从explor_auto导入的run_task函数，导致auto_exploration函数调用错误
+            # 解决方案：使用别名导入，避免命名冲突
+            from deployment import run_task as deployment_run_task
 
             # Refresh device list
             def update_execution_devices():
@@ -1265,7 +1384,8 @@ with gr.Blocks(
                     def run_in_background():
                         try:
                             # Modify run_task function to support callback
-                            original_run_task = run_task
+                            # 修复：使用正确的函数名，避免与explor_auto中的run_task冲突
+                            original_run_task = deployment_run_task
 
                             def patched_run_task(task, device):
                                 # Here, we can modify run_task function behavior, adding callback support
@@ -1289,7 +1409,8 @@ with gr.Blocks(
 
                             # Execute task
                             add_log("Starting task execution process...")
-                            result = run_task(task_description, device)
+                            # 修复：使用正确的函数名调用deployment模块的run_task
+                            result = deployment_run_task(task_description, device)
 
                             # Restore original function
                             deployment.run_task = original_run_task

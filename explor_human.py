@@ -58,7 +58,11 @@ def capture_and_parse_page(state: State) -> State:
             state["current_page_screenshot"] = saved_path
             state["current_page_json"] = parsed_json
 
-            state["page_history"].append(labeled_img)
+            # 修复：确保路径格式正确，处理Windows路径分隔符
+            # 原问题：Windows系统使用反斜杠(\)作为路径分隔符，但Gradio Gallery组件需要正斜杠(/)
+            # 解决方法：将反斜杠转换为正斜杠，确保图片路径能被前端正确识别和显示
+            normalized_labeled_img = labeled_img.replace("\\", "/")
+            state["page_history"].append(normalized_labeled_img)
 
             state["tool_results"].append(
                 {"tool_name": "screen_element", "result": parse_result}

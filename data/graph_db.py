@@ -447,41 +447,54 @@ class Neo4jDatabase:
             print(f"Error getting all actions: {str(e)}")
             return []
 
-    def get_action_by_id(self, action_id: str) -> Optional[Dict[str, Any]]:
+    def get_action_by_id(self, element_id: str) -> Optional[Dict[str, Any]]:
         """Get Action node by ID
 
         Args:
-            action_id: ID of the Action node
+            element_id: ID of the Action node or element_id within element_sequence
 
         Returns:
             Dict[str, Any] or None: Action node information, or None if not found
         """
+        # First try to find by action_id
         query = """
         MATCH (a:Action)
-        WHERE a.action_id = $action_id
+        WHERE a.action_id = $element_id
         RETURN a
         """
 
         try:
             with self.driver.session(database="neo4j") as session:
-                result = session.run(query, action_id=action_id)
+                # Try to find by action_id first
+                result = session.run(query, element_id=element_id)
                 record = result.single()
                 if record:
                     action = dict(record["a"])
                     # Deserialize JSON string fields
-                    if "element_sequence" in action and isinstance(
-                        action["element_sequence"], str
-                    ):
-                        try:
-                            action["element_sequence"] = json.loads(
-                                action["element_sequence"]
-                            )
-                        except json.JSONDecodeError:
-                            pass  # Keep as is if not valid JSON
+                    if "element_sequence" in action and isinstance(action["element_sequence"], str):
+                        action["element_sequence"] = json.loads(action["element_sequence"])
                     return action
+                
+                # If not found by action_id, search in element_sequence
+                query = """
+                MATCH (a:Action)
+                WHERE a.element_sequence CONTAINS $search_id
+                RETURN a
+                LIMIT 1
+                """
+                result = session.run(query, search_id=f'"element_id": "{element_id}"')
+                record = result.single()
+                if record:
+                    action = dict(record["a"])
+                    # Deserialize JSON string fields
+                    if "element_sequence" in action and isinstance(action["element_sequence"], str):
+                        action["element_sequence"] = json.loads(action["element_sequence"])
+                    return action
+                
                 return None
+                
         except Exception as e:
-            print(f"Error getting action by ID {action_id}: {str(e)}")
+            print(f"Error getting action by ID: {str(e)}")
             return None
 
     def get_element_by_id(self, element_id: str) -> Optional[Dict[str, Any]]:

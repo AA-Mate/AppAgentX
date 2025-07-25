@@ -225,31 +225,62 @@ def match_screen_elements(
         return []
 
     current_action = action_sequence[current_step_idx]
+    print(f"\n🔍 [DEBUG] 当前步骤信息: {current_action}")
 
     # Get element information
     element_id = current_action.get("element_id")
+    print(f"🔍 [DEBUG] 正在查找元素 ID: {element_id}")
+    
     if not element_id:
-        print("⚠️ No element ID specified in current step")
+        print("⚠️ 错误: 当前步骤未指定元素ID")
+        print(f"当前步骤详情: {current_action}")
         return []
 
     # Get template element from database - using correct method name
+    print(f"🔍 [DEBUG] 正在从数据库获取 Action 节点 (ID: {element_id})...")
     db_element = db.get_action_by_id(element_id)
+    print(f"🔍 [DEBUG] get_action_by_id 返回结果: {db_element is not None}")
+    
+    if db_element:
+        print(f"✅ 成功找到 Action 节点")
+        print(f"节点类型: {type(db_element)}")
+        print(f"节点属性: {list(db_element.keys()) if hasattr(db_element, 'keys') else 'N/A'}")
+        
+        # 检查是否是包含 element_sequence 的 Action 节点
+        if 'element_sequence' in db_element and isinstance(db_element['element_sequence'], list):
+            print(f"🔍 找到 element_sequence，包含 {len(db_element['element_sequence'])} 个步骤")
+            # 查找匹配当前 element_id 的步骤
+            current_step = next(
+                (step for step in db_element['element_sequence'] 
+                 if isinstance(step, dict) and step.get('element_id') == element_id),
+                None
+            )
+            
+            if current_step:
+                print(f"✅ 成功找到匹配的步骤: {current_step}")
+                return [{
+                    'element_id': current_step.get('element_id'),
+                    'atomic_action': current_step.get('atomic_action'),
+                    'action_params': current_step.get('action_params', {})
+                }]
+            else:
+                print(f"⚠️ 在 element_sequence 中未找到 element_id 为 {element_id} 的步骤")
+        else:
+            print(f"⚠️ Action 节点不包含有效的 element_sequence 属性")
+    else:
+        print("⚠️ 警告: 未找到对应的 Action 节点，将尝试查找 Element 节点")
+    
+    # 如果上述逻辑未返回，则尝试查找 Element 节点
+    print(f"🔍 正在查找 Element 节点 (ID: {element_id})...")
+    db_element = db.get_element_by_id(element_id)
     if not db_element:
-        print(f"⚠️ Element with ID {element_id} not found")
-        # Try to get from another type
-        db_element = db.get_element_by_id(element_id)
-        if not db_element:
-            print(f"⚠️ Action with ID {element_id} also not found")
-            return []
+        print(f"⚠️ 错误: 未找到 ID 为 {element_id} 的节点")
+        return []
 
-    # If retrieved node is an Action node, ensure it contains necessary visual information
-    # Otherwise fall back to semantic matching
-    if "action_id" in db_element and not any(
-        key in db_element for key in ["visual_embedding", "screenshot_path"]
-    ):
-        print(
-            f"⚠️ Retrieved node is an Action node but lacks visual information, falling back to semantic matching"
-        )
+    # Element 节点处理逻辑
+    print(f"✅ 成功找到 Element 节点")
+    if not any(key in db_element for key in ["visual_embedding", "screenshot_path"]):
+        print("⚠️ Element 节点缺少视觉信息，将回退到语义匹配")
         return fallback_to_semantic_match(state, action_sequence)
 
     # Check if visual embedding exists

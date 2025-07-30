@@ -1,4 +1,6 @@
+import json
 import time
+import uuid
 from typing import Any, Optional, Tuple
 
 from langchain.prompts import ChatPromptTemplate
@@ -442,11 +444,29 @@ def match_screen_elements(
 
         if matches:
             best_match = matches[0]
-            print(
-                f"✓ Found matching screen element ID: {best_match['screen_element_id']}"
-            )
-            print(f"  Match score: {best_match['match_score']}")
-            print(f"  Action type: {best_match['action_type']}")
+            matched_element = next((e for e in screen_elements if str(e.get('ID')) == str(best_match['screen_element_id'])), None)
+            print(f"\n🎯 MATCH FOUND!")
+            print(f"✓ Element ID: {best_match['screen_element_id']}")
+            print(f"✓ Match score: {best_match['match_score']}")
+            print(f"✓ Action type: {best_match['action_type']}")
+            print("\n🔍 Matched element details:")
+            if matched_element:
+                for k, v in matched_element.items():
+                    if k not in ['screenshot', 'screenshot_path']:  # Skip binary data
+                        print(f"   - {k}: {v}")
+            else:
+                print("   Element details not found")
+                
+            # Add debug info about the match
+            print("\n🔍 Match details:")
+            print(f"   - Screen element ID: {best_match['screen_element_id']}")
+            print(f"   - Template element ID: {best_match.get('template_element', {}).get('id', 'N/A')}")
+            print(f"   - Action type: {best_match.get('action_type', 'tap')}")
+            print(f"   - Match score: {best_match.get('match_score', 0):.4f}")
+            
+            # Store the best match in state for later use
+            state['last_matched_element'] = best_match
+            
             return matches
         else:
             print("❌ No matching screen element found")
@@ -682,12 +702,24 @@ def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]
     Returns:
         Whether the operation was successful
     """
-    # 记录函数开始执行
-    execution_id = str(uuid.uuid4())[:8]  # 生成一个简短的执行ID用于日志跟踪
-    print("\n" + "="*80)
-    print(f"🚀 [执行ID:{execution_id}] EXECUTE_ELEMENT_ACTION 函数被调用")
-    print(f"📌 开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print("\n🔍 元素匹配结果:")
+    # 在函数开始处导入所有需要的模块
+    import time as time_module
+    import json
+    
+    try:
+        current_time = time_module.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 记录函数开始执行
+        execution_id = str(uuid.uuid4())[:8]  # 生成一个简短的执行ID用于日志跟踪
+        print("\n" + "="*80)
+        print(f"🚀 [执行ID:{execution_id}] EXECUTE_ELEMENT_ACTION 函数被调用")
+        print(f"📌 开始时间: {current_time}")
+        print("\n🔍 元素匹配结果:")
+    except Exception as e:
+        print(f"❌ 初始化错误: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
     print(json.dumps(element_match, indent=2, ensure_ascii=False, default=str))
     
     # 记录state基本信息
@@ -726,7 +758,7 @@ def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]
     
     try:
         # 记录函数开始时间
-        func_start_time = time.time()
+        func_start_time = time_module.time()
         
         if not element_match:
             print(f"❌ [{execution_id}] 错误: 元素匹配结果为空")
@@ -745,17 +777,14 @@ def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]
         if bbox and len(bbox) == 4:
             print(f"  - 元素位置: x1={bbox[0]:.2f}, y1={bbox[1]:.2f}, x2={bbox[2]:.2f}, y2={bbox[3]:.2f}")
         
-        print("\n🔄 正在准备执行操作...")
-
-        # 获取元素ID和操作类型
+        print("\n🔄 准备执行操作...")
         element_id = element_match.get("element_id")
-        action_type = element_match.get("action_type", "tap").lower()
-        parameters = element_match.get("parameters", {})
         
-        print(f"\n📝 操作参数:")
-        print(f"  - 操作类型: {action_type}")
-        print(f"  - 元素ID: {element_id}")
-        print(f"  - 参数: {json.dumps(parameters, ensure_ascii=False, indent=2, default=str)}")
+        print("\n📌 操作详情:")
+        print(f"  操作类型: {action_type}")
+        print(f"  元素ID: {element_id}")
+        print(f"  屏幕元素ID: {element_match.get('screen_element_id', 'N/A')}")
+        print(f"  参数: {json.dumps(element_match.get('parameters', {}), ensure_ascii=False, indent=2, default=str)}")
         
         # 验证必要参数
         if not element_id and element_id != 0:  # 允许element_id为0
@@ -810,7 +839,7 @@ def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]
         print(f"  操作类型: {action_type}")
         print(f"  元素ID: {element_id}")
         print(f"  屏幕元素ID: {screen_element_id}")
-        print(f"  参数: {json.dumps(parameters, ensure_ascii=False, indent=2, default=str)}")
+        print(f"  参数: {json.dumps(element_match.get('parameters', {}), ensure_ascii=False, indent=2, default=str)}")
         
         # 检查当前页面数据
         if "current_page" not in state:
@@ -877,26 +906,35 @@ def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]
         action_params = {
             "action_type": action_type,
             "element_id": screen_element_id,
-            **parameters
+            "x": center_x,  # 添加 x 坐标
+            "y": center_y,  # 添加 y 坐标
+            **element_match.get('parameters', {})  # 保留原始参数
         }
         
         debug_print(f"操作参数: {json.dumps(action_params, indent=2, ensure_ascii=False, default=str)}")
-        print(f"  基础参数: device={action_params['device']}, action={action_params['action']}")
+        # 安全地获取device和action参数
+        device_info = state.get('device', '未指定设备')
+        action_info = action_params.get('action_type', '未知操作')
+        print(f"  基础参数: device={device_info}, action={action_info}")
         print(f"  坐标: x={center_x}, y={center_y}")
+
+        # 确保action_params包含必要的键
+        action_params['device'] = state.get('device')
+        action_params['action'] = action_type.lower()
 
         # 根据操作类型添加特定参数
         print("\n🔧 设置操作特定参数...")
         if action_type == "text":
-            text = parameters.get("text", "")
+            text = element_match.get('parameters', {}).get("text", "")
             action_params["input_str"] = text
             print(f"  ⌨️ 文本输入: '{text}'")
         elif action_type == "long_press":
-            duration = parameters.get("duration", 1000)
+            duration = element_match.get('parameters', {}).get("duration", 1000)
             action_params["duration"] = duration
             print(f"  ⏱️ 长按时长: {duration}ms")
         elif action_type == "swipe":
-            direction = parameters.get("direction", "up")
-            distance = parameters.get("distance", "medium")
+            direction = element_match.get('parameters', {}).get("direction", "up")
+            distance = element_match.get('parameters', {}).get("distance", "medium")
             action_params["direction"] = direction
             action_params["dist"] = distance
             print(f"  🔄 滑动方向: {direction}, 距离: {distance}")
@@ -928,7 +966,7 @@ def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]
             
         try:
             # 记录开始时间
-            action_start_time = time.time()
+            action_start_time = time_module.time()
             
             # 执行操作
             print("\n" + "="*80)
@@ -976,13 +1014,14 @@ def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]
                 return False
             
             # 计算执行时间
-            execution_time_ms = (time.time() - action_start_time) * 1000
+            execution_time_ms = (time_module.time() - action_start_time) * 1000
             
             print(f"\n✅ 操作执行完成")
-            print(f"  执行时间: {execution_time_ms:.2f}ms")
-            print(f"  返回类型: {type(result).__name__}")
-            print(f"  返回内容: {str(result)[:200]}{'...' if len(str(result)) > 200 else ''}")
-            
+            print(f"  返回值: {result} (类型: {type(result)})")
+            print(f"  执行耗时: {execution_time_ms:.2f}ms")
+            print(f"  调用后页面元素数量: {len(state['current_page'].get('elements_data', []))}")
+            print("="*80 + "\n")
+
             # 解析操作结果
             print("\n🔍 解析操作结果...")
             if isinstance(result, str):
@@ -1415,7 +1454,7 @@ def execute_task(
                     print(f"🔵 调用前页面元素数量: {prev_elements_count}")
                     
                     # 记录开始时间
-                    start_time = time.time()
+                    start_time = time_module.time()
                     
                     print("\n" + "="*50)
                     print("🔄 开始执行元素操作...")
@@ -1427,7 +1466,7 @@ def execute_task(
                     success = execute_element_action(state, best_match)
                     
                     # 记录耗时
-                    execution_time = time.time() - start_time
+                    execution_time = time_module.time() - start_time
                     
                     print(f"\n✅ execute_element_action 执行完成")
                     print(f"  返回值: {success} (类型: {type(success)})")
@@ -1941,7 +1980,7 @@ Ensure each step has a clear operation target and necessary parameters. If the o
 
     except Exception as e:
         print(f"❌ Error generating execution template: {str(e)}")
-        return {}
+        return []
 
 
 def prioritize_shortcuts(
@@ -2026,11 +2065,21 @@ def execute_high_level_action(
     Returns:
         Execution result
     """
-    print("🚀 Executing high-level operations...")
+    print("\n" + "="*80)
+    print("🚀 EXECUTE HIGH LEVEL ACTION - 开始执行高级操作")
+    print(f"  - Template steps: {len(execution_template.get('steps', []))}")
+    print(f"  - Shortcuts count: {len(shortcuts)}")
+    if shortcuts:
+        print(f"  - First shortcut: {shortcuts[0].get('name', 'Unknown')}")
+    print("="*80 + "\n")
 
     if not execution_template or "steps" not in execution_template:
-        print("❌ Invalid execution template")
-        return {"status": "error", "message": "Invalid execution template"}
+        error_msg = "❌ Invalid execution template: missing steps"
+        print(error_msg)
+        return {"status": "error", "message": error_msg}
+        
+    steps = execution_template.get("steps", [])
+    print(f"📋 Found {len(steps)} steps in execution template")
 
     steps = execution_template["steps"]
     if not steps or not isinstance(steps, list):
@@ -2052,8 +2101,13 @@ def execute_high_level_action(
     while state["current_step"] < state["total_steps"]:
         current_step_idx = state["current_step"]
         step = steps[current_step_idx]
-
-        print(f"\nExecuting step {current_step_idx + 1}/{state['total_steps']}")
+        
+        print("\n" + "-"*60)
+        print(f"🔄 EXECUTING STEP {current_step_idx + 1}/{state['total_steps']}")
+        print(f"  - Step type: {step.get('action_type', 'unknown')}")
+        print(f"  - Element ID: {step.get('element_id', 'N/A')}")
+        print(f"  - Parameters: {json.dumps(step.get('parameters', {}), ensure_ascii=False, indent=2)}")
+        print("-"*60 + "\n")
 
         # Capture and parse current screen
         state = capture_and_parse_screen(state)
@@ -2082,7 +2136,9 @@ def execute_high_level_action(
 
         # Special handling for back operation
         if action_type == "back":
-            print("Executing back operation")
+            print("\n🔙 EXECUTING BACK OPERATION")
+            print(f"  - Current step: {current_step_idx + 1}/{state['total_steps']}")
+            print(f"  - Action type: {action_type}")
             result = screen_action.invoke({"device": state["device"], "action": "back"})
 
             # Record history
@@ -2102,6 +2158,11 @@ def execute_high_level_action(
             continue
 
         # For operations requiring target element
+        print("\n🎯 TARGET ELEMENT OPERATION")
+        print(f"  - Target element ID: {target_element_id}")
+        print(f"  - Action type: {action_type}")
+        print(f"  - Parameters: {json.dumps(parameters, ensure_ascii=False)}")
+        
         if target_element_id is None:
             print("❌ Operation missing target element ID")
             return {
@@ -2111,24 +2172,47 @@ def execute_high_level_action(
 
         # Check if target element exists
         screen_elements = state["current_page"]["elements_data"]
+        print(f"  - Total elements on screen: {len(screen_elements) if screen_elements else 0}")
+        
         if target_element_id < 0 or target_element_id >= len(screen_elements):
             print(f"❌ Invalid target element ID: {target_element_id}")
+            if screen_elements:
+                print("  - Available element IDs: ", 
+                      ", ".join(str(i) for i in range(min(10, len(screen_elements)))) + 
+                      ("..." if len(screen_elements) > 10 else ""))
             return {
                 "status": "error",
                 "message": f"Invalid target element ID for step {current_step_idx + 1}",
             }
 
-        # Get element position
+        # Get element position and details
         element = screen_elements[target_element_id]
         bbox = element.get("bbox", [0, 0, 0, 0])
+        
+        print("\n📌 ELEMENT DETAILS:")
+        print(f"  - Element ID: {target_element_id}")
+        print(f"  - Bounding box: {bbox}")
+        print(f"  - Text: {element.get('text', 'N/A')}")
+        print(f"  - Resource ID: {element.get('resource-id', 'N/A')}")
+        print(f"  - Class: {element.get('class', 'N/A')}")
+        print(f"  - Package: {element.get('package', 'N/A')}")
+        print(f"  - Content-desc: {element.get('content-desc', 'N/A')}")
+        print(f"  - Clickable: {element.get('clickable', 'N/A')}")
+        print(f"  - Visible: {element.get('visible', 'N/A')}")
 
         # Get device size and calculate center point
         device_size = get_device_size.invoke(state["device"])
         if isinstance(device_size, str):
             device_size = {"width": 1080, "height": 1920}
+            print("⚠️ Using default device size (1080x1920)")
+        else:
+            print(f"  - Device size: {device_size['width']}x{device_size['height']}")
 
+        # Calculate click position (relative to screen size)
         center_x = int((bbox[0] + bbox[2]) / 2 * device_size["width"])
         center_y = int((bbox[1] + bbox[3]) / 2 * device_size["height"])
+        
+        print(f"  - Click position (x,y): ({center_x}, {center_y})")
 
         # Prepare operation parameters
         action_params = {
@@ -2148,11 +2232,19 @@ def execute_high_level_action(
             action_params["dist"] = parameters.get("distance", "medium")
 
         # Execute operation
-        print(
-            f"Executing operation: {action_type} at position ({center_x}, {center_y})"
-        )
+        print("\n🚀 EXECUTING ACTION:")
+        print(f"  - Action: {action_type.upper()}")
+        print(f"  - Position: ({center_x}, {center_y})")
         if action_type == "text":
-            print(f"Input text: {action_params.get('input_str', '')}")
+            print(f"  - Input text: {action_params.get('input_str', '')}")
+        elif action_type == "long_press":
+            print(f"  - Duration: {action_params.get('duration', 1000)}ms")
+        elif action_type == "swipe":
+            print(f"  - Direction: {action_params.get('direction', 'up')}")
+            print(f"  - Distance: {action_params.get('dist', 'medium')}")
+            
+        print(f"  - Action params: {json.dumps(action_params, default=str)}")
+        print("-" * 60)
 
         result = screen_action.invoke(action_params)
 
@@ -2299,8 +2391,25 @@ def match_elements_node(state: DeploymentState) -> DeploymentState:
 
     # Call match_screen_elements function
     state_dict = dict(state)
+    print("\n🔍 Starting visual element matching...")
+    print(f"  - Elements to match: {len(action_sequence)}")
+    if action_sequence:
+        print(f"  - First element to match: {action_sequence[0].get('element_id', 'Unknown')}")
+    
     element_matches = match_screen_elements(state_dict, action_sequence)
     state["matched_elements"] = element_matches
+    
+    # Debug: Print matched elements
+    if element_matches:
+        print("\n✅ Visual matching results:")
+        for i, match in enumerate(element_matches, 1):
+            print(f"  {i}. Element ID: {match.get('screen_element_id')}")
+            print(f"     Action: {match.get('action_type')}")
+            print(f"     Score: {match.get('match_score'):.4f}")
+            if 'template_element' in match:
+                print(f"     Template: {match['template_element'].get('id', 'N/A')}")
+    else:
+        print("\n❌ No elements matched via visual matching")
 
     if not state["matched_elements"]:
         print(
@@ -2328,7 +2437,7 @@ def match_elements_node(state: DeploymentState) -> DeploymentState:
                     return state
 
             if not element_sequence or not isinstance(element_sequence, list):
-                print(f"❌ Element sequence is empty or invalid format")
+                print(f"❌ Element sequence is empty or incorrectly formatted")
                 state["should_fallback"] = True
                 return state
 
@@ -2363,7 +2472,33 @@ def check_shortcuts_node(state: DeploymentState) -> DeploymentState:
     """
     Check element associations with shortcuts
     """
-    print("🔍 Checking element associations with shortcuts...")
+    print("\n🔍 Checking element associations with shortcuts...")
+    
+    if state.get('matched_elements'):
+        print(f"  Found {len(state['matched_elements'])} matched elements")
+        for i, match in enumerate(state['matched_elements'], 1):
+            element_id = match.get('screen_element_id')
+            element = next((e for e in state.get('current_page', {}).get('elements_data', []) 
+                          if str(e.get('ID')) == str(element_id)), None)
+            print(f"\n  Match {i}:")
+            print(f"    - Element ID: {element_id}")
+            print(f"    - Match score: {match.get('match_score'):.4f}")
+            print(f"    - Action type: {match.get('action_type')}")
+            if element:
+                print(f"    - Element details:")
+                for k, v in element.items():
+                    if k not in ['screenshot', 'screenshot_path']:  # Skip binary data
+                        print(f"      - {k}: {v}")
+    else:
+        print("  No matched elements found in state")
+        
+    # Print current task information
+    task = state.get('current_task', {})
+    if task:
+        print("\n📋 Current task:")
+        print(f"  - Task ID: {task.get('id')}")
+        print(f"  - Description: {task.get('description')}")
+        print(f"  - Status: {task.get('status')}")
 
     if not state["matched_elements"]:
         print("⚠️ No matched elements, cannot check shortcut associations")
@@ -2450,10 +2585,26 @@ def execute_action_node(state: DeploymentState) -> DeploymentState:
     """
     Execute operation
     """
+    print("\n" + "="*80)
+    print("🚀 EXECUTE ACTION NODE - 开始执行操作")
+    print(f"  - should_execute_shortcut: {state.get('should_execute_shortcut')}")
+    print(f"  - has execution_template: {'execution_template' in state and state['execution_template']}")
+    print(f"  - has matched_elements: {bool(state.get('matched_elements'))}")
+    if state.get('matched_elements'):
+        print(f"  - Matched elements count: {len(state['matched_elements'])}")
+        for i, match in enumerate(state['matched_elements'], 1):
+            print(f"    {i}. ID: {match.get('screen_element_id')}, "
+                  f"Action: {match.get('action_type')}, "
+                  f"Score: {match.get('match_score', 0):.4f}")
+    print("="*80 + "\n")
+    
     state_dict = dict(state)
 
-    if state["should_execute_shortcut"] and state["execution_template"]:
+    if state.get("should_execute_shortcut") and state.get("execution_template"):
         print("🚀 Executing high-level operation...")
+        print(f"  - Shortcut: {state.get('current_shortcut', {}).get('name', 'Unknown')}")
+        print(f"  - Template steps: {len(state['execution_template'].get('steps', []))}")
+        
         # Call execute_high_level_action function
         result = execute_high_level_action(
             state_dict, state["associated_shortcuts"], state["execution_template"]
@@ -2477,6 +2628,31 @@ def execute_action_node(state: DeploymentState) -> DeploymentState:
             )
             # Mark for fallback on failure
             state["should_fallback"] = True
+    
+    # Handle case where we have matched elements but no shortcut execution
+    elif state.get("matched_elements"):
+        print("🎯 Executing matched elements...")
+        success = True
+        
+        for element_match in state["matched_elements"]:
+            print(f"  - Executing action on element {element_match.get('screen_element_id')} "
+                  f"(score: {element_match.get('match_score', 0):.4f})")
+            
+            # Execute the action on the matched element
+            element_success = execute_element_action(state_dict, element_match)
+            
+            if not element_success:
+                print(f"❌ Failed to execute action on element {element_match.get('screen_element_id')}")
+                success = False
+                state["should_fallback"] = True
+                break
+        
+        if success:
+            print("✅ Successfully executed all matched elements")
+            state["execution_status"] = "success"
+            state["completed"] = True
+    
+    # Fall back to task matching if no matched elements
     else:
         print("📝 Attempting to match task with high-level actions...")
         # Call match_task_to_action function

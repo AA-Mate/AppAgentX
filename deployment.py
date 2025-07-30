@@ -232,15 +232,42 @@ def match_screen_elements(
         print("⚠️ No element ID specified in current step")
         return []
 
-    # Get template element from database - using correct method name
+    # 首先尝试从action nodes获取元素
     db_element = db.get_action_by_id(element_id)
     if not db_element:
-        print(f"⚠️ Element with ID {element_id} not found")
-        # Try to get from another type
+        print(f"⚠️ [1/2] 在action nodes中未找到元素 ID: {element_id}, 尝试从普通element nodes获取...")
+        # 如果action nodes中未找到，则尝试从普通element nodes获取
         db_element = db.get_element_by_id(element_id)
         if not db_element:
-            print(f"⚠️ Action with ID {element_id} also not found")
+            print(f"❌ [2/2] 在普通element nodes中仍未找到元素 ID: {element_id}")
+            print(f"     元素ID: {element_id}")
+            print(f"     当前步骤: {current_action}")
             return []
+        else:
+            print(f"✅ [2/2] 成功从普通element nodes获取到元素 ID: {element_id}")
+    else:
+        print(f"✅ [1/1] 成功从action nodes获取到元素 ID: {element_id}")
+        
+    # 打印元素信息用于调试
+    if db_element:
+        print(f"📋 元素信息:")
+        print(f"   - 类型: {db_element.get('type', 'N/A')}")
+        print(f"   - 内容: {db_element.get('content', 'N/A')}")
+        print(f"   - 是否有视觉特征: {'是' if db_element.get('visual_embedding') else '否'}")
+        print(f"   - 截图路径: {db_element.get('screenshot_path', 'N/A')}")
+        
+        # 打印完整的元素对象信息
+        print("\n🔍 完整元素对象:")
+        for key, value in db_element.items():
+            # 如果值是字节类型，则只显示类型和长度
+            if isinstance(value, (bytes, bytearray)):
+                print(f"   - {key}: <{type(value).__name__} 长度={len(value)}>")
+            # 如果值太长则截断显示
+            elif isinstance(value, str) and len(value) > 100:
+                print(f"   - {key}: {value[:100]}... (共{len(value)}字符)")
+            # 其他情况正常显示
+            else:
+                print(f"   - {key}: {value}")
 
     # If retrieved node is an Action node, ensure it contains necessary visual information
     # Otherwise fall back to semantic matching
@@ -261,19 +288,44 @@ def match_screen_elements(
         # Try to get element screenshot or extract features using bounding box information
         if "screenshot_path" in db_element and db_element["screenshot_path"]:
             try:
-                # Extract template element features
+                # Extract template element features from local screenshot
+                print("🔄 从本地截图提取视觉特征...")
                 template_embedding = extract_features(
                     db_element["screenshot_path"], "resnet50"
                 )["features"]
+                print("✅ 成功从本地截图提取视觉特征")
             except Exception as e:
-                print(f"❌ Cannot extract template element features: {str(e)}")
-                return fallback_to_semantic_match(state, action_sequence)
+                print(f"❌ 无法从本地截图提取特征: {str(e)}")
+                print("🔄 尝试从Pinecone获取特征...")
+                template_embedding = None
         else:
-            # No visual embedding, fall back to semantic matching
-            print(
-                "⚠️ Cannot get template element visual features, falling back to semantic matching"
-            )
-            return fallback_to_semantic_match(state, action_sequence)
+            print("ℹ️ 未找到本地截图路径")
+            template_embedding = None
+            
+        # 如果本地特征提取失败或没有本地截图，尝试从Pinecone获取
+        if template_embedding is None:
+            try:
+                print(f"🔄 尝试从Pinecone获取元素 {element_id} 的视觉特征...")
+                # 从Pinecone获取元素特征
+                result = vector_db.index.fetch(
+                    ids=[element_id],
+                    namespace="element"  # 确保与存储时的命名空间一致
+                )
+                
+                if element_id in result.vectors:
+                    vector_data = result.vectors[element_id]
+                    template_embedding = vector_data.values
+                    print(f"✅ 成功从Pinecone获取视觉特征 (维度: {len(template_embedding)})")
+                    
+                    # 调试信息
+                    print(f"📌 元素元数据: {vector_data.metadata}")
+                else:
+                    print(f"❌ 在Pinecone中未找到元素 {element_id} 的特征")
+                    return fallback_to_semantic_match(state, action_sequence)
+            except Exception as e:
+                print(f"❌ 从Pinecone获取特征时出错: {str(e)}")
+                print("🔄 回退到语义匹配...")
+                return fallback_to_semantic_match(state, action_sequence)
 
     # Process current screen elements
     screen_elements = state["current_page"]["elements_data"]
@@ -284,24 +336,72 @@ def match_screen_elements(
         # Get visual embeddings for all elements on current screen
         from tool.img_tool import elements_img, extract_features
 
-        # Extract features for all screen elements
+        print(f"\n🔍 Starting feature extraction for {len(screen_elements)} screen elements...")
         element_embeddings = []
+        
         for idx, element in enumerate(screen_elements):
+            element_id = element.get("ID", idx)
+            # Print detailed element information
+            element_name = element.get('name', 'No name')
+            element_text = element.get('text', 'No text')
+            element_class = element.get('class', 'No class')
+            element_bounds = element.get('bounds', 'No bounds')
+            element_visible = element.get('visible', 'Unknown')
+            
+            print(f"\n🔄 Processing element {idx} (ID: {element_id})")
+            print(f"  📝 Element details:")
+            print(f"     - Name: {element_name}")
+            print(f"     - Text: {element_text}")
+            print(f"     - Class: {element_class}")
+            print(f"     - Bounds: {element_bounds}")
+            print(f"     - Visible: {element_visible}")
+            print(f"     - All properties: {element}")
+            
             try:
-                # Use element_img to get element image
-                element_img_stream = elements_img(
-                    screenshot_path, json.dumps(screen_elements), element.get("ID", idx)
-                )
+                # Prepare input for elements_img with correct parameter names
+                input_data = {
+                    "page_path": screenshot_path,  # Changed from screenshot_path to page_path
+                    "json_path": elements_json_path,  # Using the elements_json_path from state
+                    "IDs": [str(element_id)]  # Changed from element_id to IDs and made it a list
+                }
+                
+                print(f"  📂 Input data prepared for elements_img")
+                
+                # Get element image using invoke
+                print("  🖼️  Calling elements_img.invoke()...")
+                element_img_stream = elements_img.invoke(input_data)
+                
+                if not element_img_stream:
+                    print(f"  ⚠️  Empty response from elements_img for element {idx}")
+                    continue
+                    
+                print(f"  ✅ Successfully got element image (type: {type(element_img_stream)})")
+                
                 # Extract features
+                print("  🔄 Extracting visual features...")
                 element_feature = extract_features(element_img_stream, "resnet50")
-                element_embeddings.append((idx, element_feature["features"]))
+                
+                if not element_feature or "features" not in element_feature:
+                    print(f"  ⚠️  Failed to extract features for element {idx}")
+                    continue
+                    
+                feature_vector = element_feature["features"]
+                print(f"  ✅ Extracted features (dimensions: {len(feature_vector) if feature_vector else 0})")
+                
+                element_embeddings.append((idx, feature_vector))
+                print(f"  🎯 Added features for element {idx} to processing queue")
+                
             except Exception as e:
-                print(f"⚠️ Cannot extract features for element {idx}: {str(e)}")
+                print(f"  ❌ Error processing element {idx}: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 continue
 
         if not element_embeddings:
-            print("❌ Failed to extract features for any screen elements")
+            print("\n❌ Failed to extract features for any screen elements")
             return fallback_to_semantic_match(state, action_sequence)
+            
+        print(f"\n✅ Successfully extracted features for {len(element_embeddings)}/{len(screen_elements)} elements")
 
         # Calculate similarity and sort
         import numpy as np
@@ -356,7 +456,7 @@ def match_screen_elements(
         print(f"❌ Error during visual matching: {str(e)}")
         # Fall back to semantic matching on error
         return fallback_to_semantic_match(state, action_sequence)
-
+    
 
 def fallback_to_semantic_match(
     state: DeploymentState, action_sequence: List[Dict[str, Any]]
@@ -413,13 +513,13 @@ Current screen elements:
 {screen_elements}
 
 Please find the screen element that best matches the template element, and return in the following JSON format:
-{
-  "element_id": "template element ID",
+{{
+  "element_id": "{element_id}",
   "match_score": matching score (0-1),
   "screen_element_id": screen element ID,
   "action_type": "atomic action type (tap/text/swipe etc.)",
-  "parameters": {action parameters object}
-}
+  "parameters": {{action parameters object}}
+}}
 
 If no element with matching score above 0.6 is found, set match_score to 0 and screen_element_id to -1.
 """,
@@ -496,6 +596,7 @@ If no element with matching score above 0.6 is found, set match_score to 0 and s
     try:
         # Prepare input
         match_input = {
+            "element_id": current_db_element.get(element_id_field, "unknown"),
             "template_element": template_element_desc,
             "screen_elements": screen_elements_desc,
         }
@@ -506,29 +607,71 @@ If no element with matching score above 0.6 is found, set match_score to 0 and s
         # Build chain
         match_chain = element_match_prompt | model | parser
 
-        # Execute matching
-        match_result = match_chain.invoke(match_input)
-
-        # Check matching result
-        if match_result.match_score >= 0.6 and match_result.screen_element_id >= 0:
-            print(
-                f"✓ Found matching screen element ID: {match_result.screen_element_id}"
-            )
-            print(f"  Match score: {match_result.match_score}")
-            print(f"  Action type: {match_result.action_type}")
-            return [match_result.dict()]
-        else:
-            print(f"❌ No matching screen element found")
+        # Execute matching with detailed logging
+        print("\n=== Starting LLM Matching ===")
+        print("Match Input:", json.dumps(match_input, indent=2, ensure_ascii=False))
+        
+        try:
+            match_result = match_chain.invoke(match_input)
+            print("\nMatch Result (Raw):", match_result)
+            
+            # Convert to dict for better logging
+            result_dict = match_result if isinstance(match_result, dict) else match_result.dict()
+            print("\nMatch Result (Parsed):", json.dumps(result_dict, indent=2, ensure_ascii=False))
+            
+            # 安全地获取匹配分数和元素ID
+            match_score = match_result.get('match_score', 0) if isinstance(match_result, dict) else getattr(match_result, 'match_score', 0)
+            screen_element_id = match_result.get('screen_element_id', -1) if isinstance(match_result, dict) else getattr(match_result, 'screen_element_id', -1)
+            
+            if match_score >= 0.6 and screen_element_id >= 0:
+                print("\n✓ Match Successful!")
+                print(f"  Screen Element ID: {screen_element_id}")
+                print(f"  Match Score: {match_score}")
+                
+                # 安全获取 action_type
+                action_type = match_result.get('action_type', 'tap') if isinstance(match_result, dict) else getattr(match_result, 'action_type', 'tap')
+                print(f"  Action Type: {action_type}")
+                
+                # 安全获取参数
+                params = match_result.get('parameters', {}) if isinstance(match_result, dict) else getattr(match_result, 'parameters', {})
+                
+                if params:
+                    print(f"  Parameters: {params}")
+                
+                # 准备返回结果
+                result = {
+                    'element_id': match_result.get('element_id', '') if isinstance(match_result, dict) else getattr(match_result, 'element_id', ''),
+                    'match_score': match_score,
+                    'screen_element_id': screen_element_id,
+                    'action_type': action_type,
+                    'parameters': params if isinstance(params, dict) else {}
+                }
+                return [result]
+            else:
+                print("\n❌ No matching screen element found (score too low or invalid ID)")
+                return []
+                
+        except Exception as e:
+            print(f"\n❌ Error during LLM matching: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return []
-
+            
     except Exception as e:
-        print(f"❌ Error during element matching: {str(e)}")
+        print(f"\n❌ Error preparing LLM matching: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
-def execute_element_action(
-    state: DeploymentState, element_match: Dict[str, Any]
-) -> bool:
+def debug_print(*args, **kwargs):
+    """Helper function for debug output"""
+    print("\n" + "="*80)
+    print("🐛 [DEBUG]", *args, **kwargs)
+    print("="*80 + "\n")
+
+
+def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]) -> bool:
     """
     Execute screen element action
 
@@ -539,76 +682,379 @@ def execute_element_action(
     Returns:
         Whether the operation was successful
     """
+    # 记录函数开始执行
+    execution_id = str(uuid.uuid4())[:8]  # 生成一个简短的执行ID用于日志跟踪
+    print("\n" + "="*80)
+    print(f"🚀 [执行ID:{execution_id}] EXECUTE_ELEMENT_ACTION 函数被调用")
+    print(f"📌 开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("\n🔍 元素匹配结果:")
+    print(json.dumps(element_match, indent=2, ensure_ascii=False, default=str))
+    
+    # 记录state基本信息
+    print("\n📊 State 基本信息:")
+    print(f"  - 包含的键: {list(state.keys())}")
+    print(f"  - 设备: {state.get('device', '未指定')}")
+    print(f"  - 当前步骤: {state.get('current_step', 0)}/{state.get('total_steps', 1)}")
+    
+    # 检查关键数据结构
+    if 'current_page' not in state:
+        print("❌ 错误: state 中缺少 'current_page' 键")
+        return False
+    
+    current_page = state['current_page']
+    print("\n📄 当前页面信息:")
+    print(f"  - 页面元素数量: {len(current_page.get('elements_data', []))}")
+    print(f"  - 截图路径: {current_page.get('screenshot', '未指定')}")
+    
+    # 检查screen_action工具
+    print("\n🔧 工具检查:")
+    print(f"  - screen_action 类型: {type(screen_action).__name__}")
+    print(f"  - screen_action 可调用: {callable(screen_action.invoke)}")
+    print(f"  - screen_action 模块: {screen_action.__module__}")
+    
+    # 记录内存使用情况
     try:
+        import psutil
+        process = psutil.Process()
+        mem_info = process.memory_info()
+        print(f"\n💾 内存使用: {mem_info.rss / 1024 / 1024:.2f} MB")
+    except ImportError:
+        print("\nℹ️ 安装psutil包可以查看内存使用情况")
+    
+    print("\n" + "="*80)
+    print("🛠️ 开始执行元素操作...")
+    
+    try:
+        # 记录函数开始时间
+        func_start_time = time.time()
+        
         if not element_match:
+            print(f"❌ [{execution_id}] 错误: 元素匹配结果为空")
             return False
+            
+        # 记录操作详情
+        action_type = element_match.get("action_type", "tap").upper()
+        print(f"\n🎯 准备执行 {action_type} 操作:")
+        print(f"  - 元素ID: {element_match.get('element_id', 'N/A')}")
+        print(f"  - 元素类型: {element_match.get('element_type', 'N/A')}")
+        print(f"  - 元素内容: {element_match.get('element_content', 'N/A')}")
+        print(f"  - 匹配分数: {element_match.get('match_score', 0):.2f}")
+        
+        # 记录边界框信息
+        bbox = element_match.get('bbox', [])
+        if bbox and len(bbox) == 4:
+            print(f"  - 元素位置: x1={bbox[0]:.2f}, y1={bbox[1]:.2f}, x2={bbox[2]:.2f}, y2={bbox[3]:.2f}")
+        
+        print("\n🔄 正在准备执行操作...")
 
-        # Get action type and parameters
-        action_type = element_match.get("action_type", "tap")
+        # 获取元素ID和操作类型
+        element_id = element_match.get("element_id")
+        action_type = element_match.get("action_type", "tap").lower()
         parameters = element_match.get("parameters", {})
+        
+        print(f"\n📝 操作参数:")
+        print(f"  - 操作类型: {action_type}")
+        print(f"  - 元素ID: {element_id}")
+        print(f"  - 参数: {json.dumps(parameters, ensure_ascii=False, indent=2, default=str)}")
+        
+        # 验证必要参数
+        if not element_id and element_id != 0:  # 允许element_id为0
+            print("❌ 错误: 缺少元素ID")
+            return False
+        
+        # 记录当前页面元素信息
+        current_page = state['current_page']
+        elements_data = current_page.get('elements_data', [])
+        print(f"\n📋 当前页面元素信息:")
+        print(f"  - 页面元素总数: {len(elements_data)}")
+        
+        # 查找当前元素在页面元素列表中的位置
+        screen_element = None
         screen_element_id = element_match.get("screen_element_id", -1)
-
-        if screen_element_id < 0 or screen_element_id >= len(
-            state["current_page"]["elements_data"]
-        ):
-            print(f"❌ Invalid screen element ID: {screen_element_id}")
+        
+        # 记录元素查找过程
+        print(f"\n🔍 查找元素 (ID: {element_id}, 屏幕ID: {screen_element_id}):")
+        
+        # 优先使用screen_element_id查找
+        if screen_element_id != -1 and 0 <= screen_element_id < len(elements_data):
+            screen_element = elements_data[screen_element_id]
+            print(f"  ✅ 通过screen_element_id找到元素")
+        # 否则尝试通过element_id查找
+        elif element_id is not None:
+            for idx, elem in enumerate(elements_data):
+                if elem.get("ID") == element_id or idx == element_id:
+                    screen_element = elem
+                    screen_element_id = idx
+                    print(f"  ✅ 通过element_id找到元素 (索引: {idx})")
+                    break
+        
+        if not screen_element:
+            print(f"❌ 错误: 未找到匹配的元素 (ID: {element_id}, 屏幕ID: {screen_element_id})")
+            print(f"     页面元素ID列表: {[e.get('ID', 'N/A') for e in elements_data[:10]]}{'...' if len(elements_data) > 10 else ''}")
+            return False
+            
+        # 记录找到的元素信息
+        print(f"  - 元素类型: {screen_element.get('type', 'unknown')}")
+        print(f"  - 元素内容: {screen_element.get('content', 'N/A')}")
+        print(f"  - 可交互: {screen_element.get('interactivity', False)}")
+        
+        # 记录边界框信息
+        bbox = screen_element.get('bbox', [])
+        if bbox and len(bbox) == 4:
+            print(f"  - 元素位置: x1={bbox[0]:.2f}, y1={bbox[1]:.2f}, x2={bbox[2]:.2f}, y2={bbox[3]:.2f}")
+            
+        print("\n🔄 准备执行操作...")
+        element_id = element_match.get("element_id", "unknown")
+        
+        print("\n📌 操作详情:")
+        print(f"  操作类型: {action_type}")
+        print(f"  元素ID: {element_id}")
+        print(f"  屏幕元素ID: {screen_element_id}")
+        print(f"  参数: {json.dumps(parameters, ensure_ascii=False, indent=2, default=str)}")
+        
+        # 检查当前页面数据
+        if "current_page" not in state:
+            print("❌ 错误: state 中缺少 'current_page' 键")
+            return False
+            
+        if "elements_data" not in state["current_page"]:
+            print("❌ 错误: state['current_page'] 中缺少 'elements_data' 键")
             return False
 
-        # Get element position
-        element = state["current_page"]["elements_data"][screen_element_id]
+        # 验证屏幕元素ID是否有效
+        elements_data = state["current_page"]["elements_data"]
+        elements_count = len(elements_data)
+        print(f"\n🔍 页面元素验证:")
+        print(f"  当前页面元素数量: {elements_count}")
+        print(f"  请求的屏幕元素ID: {screen_element_id}")
+        
+        if not isinstance(screen_element_id, int) or screen_element_id < 0 or screen_element_id >= elements_count:
+            print(f"❌ 错误: 无效的屏幕元素ID: {screen_element_id} (有效范围: 0-{elements_count-1})")
+            if elements_count > 0:
+                print("  可用的元素ID示例:")
+                for i in range(min(3, elements_count)):  # 只显示前3个元素作为示例
+                    print(f"    元素 {i}: {elements_data[i].get('text', elements_data[i].get('content', 'No content'))}")
+            return False
+
+        # 获取元素位置
+        print("\n🔍 获取元素位置信息...")
+        element = elements_data[screen_element_id]
         bbox = element.get("bbox", [0, 0, 0, 0])
+        print(f"  元素边界框 (归一化坐标): {bbox}")
+        print(f"  元素内容: {element.get('content', element.get('text', '无内容'))}")
+        print(f"  元素类型: {element.get('type', '未知')}")
+        print(f"  元素属性: {json.dumps({k: v for k, v in element.items() if k not in ['bbox', 'content', 'text', 'type']}, default=str)}")
 
-        # Get device size and calculate center point
-        device_size = get_device_size.invoke(state["device"])
-        if isinstance(device_size, str):
-            # Default size
+        # 获取设备尺寸并计算中心点
+        print("\n📱 获取设备尺寸...")
+        try:
+            device_size = get_device_size.invoke(state["device"])
+            if isinstance(device_size, str):
+                print(f"⚠️ 使用默认设备尺寸 (获取失败: {device_size})")
+                device_size = {"width": 1080, "height": 1920}
+            else:
+                print(f"  设备尺寸: {device_size.get('width', 'N/A')}x{device_size.get('height', 'N/A')}")
+        except Exception as e:
+            print(f"❌ 获取设备尺寸时出错: {str(e)}")
             device_size = {"width": 1080, "height": 1920}
-        center_x = int((bbox[0] + bbox[2]) / 2 * device_size["width"])
-        center_y = int((bbox[1] + bbox[3]) / 2 * device_size["height"])
+            print(f"⚠️ 使用默认设备尺寸: {device_size['width']}x{device_size['height']}")
+            
+        # 计算点击位置（归一化坐标转换为实际像素）
+        try:
+            center_x = int((float(bbox[0]) + float(bbox[2])) / 2 * float(device_size["width"]))
+            center_y = int((float(bbox[1]) + float(bbox[3])) / 2 * float(device_size["height"]))
+            print(f"🎯 计算点击位置: ({center_x}, {center_y})")
+            print(f"  基于边界框: {bbox}")
+            print(f"  使用设备尺寸: {device_size['width']}x{device_size['height']}")
+        except (IndexError, ValueError, TypeError) as e:
+            print(f"❌ 计算点击位置时出错: {str(e)}")
+            print(f"  边界框: {bbox}")
+            print(f"  设备尺寸: {device_size}")
+            return False
 
-        # Prepare action parameters
+        # 准备操作参数
+        debug_print("准备操作参数...")
         action_params = {
-            "device": state["device"],
-            "action": action_type,
-            "x": center_x,
-            "y": center_y,
+            "action_type": action_type,
+            "element_id": screen_element_id,
+            **parameters
         }
+        
+        debug_print(f"操作参数: {json.dumps(action_params, indent=2, ensure_ascii=False, default=str)}")
+        print(f"  基础参数: device={action_params['device']}, action={action_params['action']}")
+        print(f"  坐标: x={center_x}, y={center_y}")
 
-        # Add specific parameters based on action type
+        # 根据操作类型添加特定参数
+        print("\n🔧 设置操作特定参数...")
         if action_type == "text":
-            action_params["input_str"] = parameters.get("text", "")
+            text = parameters.get("text", "")
+            action_params["input_str"] = text
+            print(f"  ⌨️ 文本输入: '{text}'")
         elif action_type == "long_press":
-            action_params["duration"] = parameters.get("duration", 1000)
+            duration = parameters.get("duration", 1000)
+            action_params["duration"] = duration
+            print(f"  ⏱️ 长按时长: {duration}ms")
         elif action_type == "swipe":
-            action_params["direction"] = parameters.get("direction", "up")
-            action_params["dist"] = parameters.get("distance", "medium")
-
-        # Execute action
-        print(f"Executing action: {action_type} at position ({center_x}, {center_y})")
-        result = screen_action.invoke(action_params)
-
-        # Parse operation result
-        if isinstance(result, str):
-            try:
-                result_json = json.loads(result)
-                if result_json.get("status") == "success":
-                    print(f"✓ Action executed successfully")
-                    return True
-                else:
-                    print(
-                        f"❌ Action execution failed: {result_json.get('message', 'Unknown error')}"
-                    )
-                    return False
-            except:
-                print(f"❌ Cannot parse operation result: {result}")
-                return False
+            direction = parameters.get("direction", "up")
+            distance = parameters.get("distance", "medium")
+            action_params["direction"] = direction
+            action_params["dist"] = distance
+            print(f"  🔄 滑动方向: {direction}, 距离: {distance}")
         else:
-            print(f"❌ Operation returned non-string result")
+            print(f"  ℹ️ 基本点击操作 (tap)")
+
+        # 记录操作摘要
+        print(f"\n🚀 操作摘要:")
+        print(f"  操作类型: {action_type.upper()}")
+        print(f"  目标元素: {element_id}")
+        print(f"  屏幕位置: ({center_x}, {center_y})")
+        if action_type == "text":
+            print(f"  输入文本: '{text}'")
+
+        # 执行操作
+        print("\n" + "="*80)
+        print("🔄 开始执行设备操作...")
+        print(f"🔍 调用 screen_action.invoke()")
+        print(f"  参数类型: {type(action_params)}")
+        print(f"  参数内容: {json.dumps(action_params, indent=2, default=str, ensure_ascii=False)}")
+        
+        # 验证必要参数
+        if action_type == "tap" and (action_params.get('x') is None or action_params.get('y') is None):
+            print("❌ 错误: 点击操作需要 x 和 y 坐标")
+            return False
+        elif action_type == "swipe" and (action_params.get('start') is None or action_params.get('end') is None):
+            print("❌ 错误: 滑动操作需要 start 和 end 坐标")
+            return False
+            
+        try:
+            # 记录开始时间
+            action_start_time = time.time()
+            
+            # 执行操作
+            print("\n" + "="*80)
+            print("🔵 [DEBUG] 准备调用 screen_action.invoke()")
+            print(f"🔵 [DEBUG] 参数类型: {type(action_params)}")
+            print(f"🔵 [DEBUG] 参数内容: {json.dumps(action_params, indent=2, default=str, ensure_ascii=False)}")
+            
+            # 确保 screen_action 是可调用的
+            if not callable(screen_action.invoke):
+                print("❌ [DEBUG] screen_action.invoke 不是可调用对象")
+                return False
+            
+            # 打印 screen_action 的详细信息
+            print(f"\n🔵 [DEBUG] screen_action 对象信息:")
+            print(f"  类型: {type(screen_action)}")
+            print(f"  模块: {getattr(screen_action, '__module__', 'unknown')}")
+            print(f"  名称: {getattr(screen_action, '__name__', 'unknown')}")
+            print(f"  文档: {getattr(screen_action, '__doc__', 'No docstring')}")
+            
+            # 打印 screen_action.invoke 的详细信息
+            print(f"\n🔵 [DEBUG] screen_action.invoke 方法信息:")
+            print(f"  类型: {type(screen_action.invoke)}")
+            print(f"  可调用: {callable(screen_action.invoke)}")
+            
+            # 记录调用前时间
+            import time
+            start_time = time.time()
+            
+            try:
+                print("\n🔵 [DEBUG] 正在调用 screen_action.invoke...")
+                result = screen_action.invoke(action_params)
+                execution_time = (time.time() - start_time) * 1000  # 转换为毫秒
+                print(f"✅ [DEBUG] screen_action.invoke 调用成功 (耗时: {execution_time:.2f}ms)")
+                print(f"  返回结果类型: {type(result)}")
+                print(f"  返回结果内容: {result}")
+            except Exception as e:
+                execution_time = (time.time() - start_time) * 1000
+                print(f"❌ [DEBUG] screen_action.invoke 调用失败 (耗时: {execution_time:.2f}ms)")
+                print(f"  错误类型: {type(e).__name__}")
+                print(f"  错误信息: {str(e)}")
+                print(f"  错误详情: {e}")
+                print("  错误堆栈:")
+                import traceback
+                traceback.print_exc()
+                return False
+            
+            # 计算执行时间
+            execution_time_ms = (time.time() - action_start_time) * 1000
+            
+            print(f"\n✅ 操作执行完成")
+            print(f"  执行时间: {execution_time_ms:.2f}ms")
+            print(f"  返回类型: {type(result).__name__}")
+            print(f"  返回内容: {str(result)[:200]}{'...' if len(str(result)) > 200 else ''}")
+            
+            # 解析操作结果
+            print("\n🔍 解析操作结果...")
+            if isinstance(result, str):
+                try:
+                    # 尝试解析JSON结果
+                    result_json = json.loads(result)
+                    print("  成功解析为JSON")
+                    print(f"  解析后内容: {json.dumps(result_json, indent=2, ensure_ascii=False, default=str)}")
+                    
+                    status = result_json.get("status", "unknown").lower()
+                    message = result_json.get("message", "")
+                    
+                    if status == "success":
+                        print("\n🎉 操作执行成功!")
+                        if message:
+                            print(f"   返回信息: {message}")
+                        return True
+                    else:
+                        error_msg = message if message else "未提供错误信息"
+                        print(f"\n❌ 操作执行失败: {error_msg}")
+                        print(f"   状态码: {status}")
+                        return False
+                        
+                except json.JSONDecodeError:
+                    print(f"\n⚠️ 操作结果不是有效的JSON")
+                    print(f"  原始返回: {result}")
+                    
+                    # 检查是否包含错误信息
+                    if any(err in result.lower() for err in ["error", "fail", "exception"]):
+                        print("❌ 检测到可能的错误信息")
+                        return False
+                    else:
+                        print("ℹ️ 将非JSON响应视为成功")
+                        return True
+                        
+            elif result is None:
+                print("\n⚠️ 操作返回了 None")
+                print("ℹ️ 将None响应视为成功")
+                return True
+                
+            else:
+                print(f"\n⚠️ 操作返回了非字符串结果: {type(result).__name__}")
+                print(f"  返回内容: {str(result)[:200]}{'...' if len(str(result)) > 200 else ''}")
+                
+                # 对于非字符串的返回值，检查是否有错误指示
+                if hasattr(result, "get"):
+                    error = result.get("error") or result.get("status") == "error"
+                    if error:
+                        print(f"❌ 检测到错误: {error}")
+                        return False
+                
+                print("ℹ️ 将非字符串响应视为成功")
+                return True
+                
+        except Exception as e:
+            print(f"\n❌❌❌ 执行操作时发生异常 ❌❌❌")
+            print(f"  错误类型: {type(e).__name__}")
+            print(f"  错误信息: {str(e)}")
+            print("\n堆栈跟踪:")
+            traceback.print_exc()
             return False
 
     except Exception as e:
-        print(f"❌ Error executing element action: {str(e)}")
+        import traceback
+        print(f"\n❌❌❌ 执行元素操作时发生未捕获的异常 ❌❌❌")
+        print(f"错误类型: {type(e).__name__}")
+        print(f"错误信息: {str(e)}")
+        print("\n堆栈跟踪:")
+        traceback.print_exc()
         return False
+    finally:
+        print("="*80 + "\n")
 
 
 def fallback_to_react(state: DeploymentState) -> DeploymentState:
@@ -760,174 +1206,364 @@ def execute_task(
     Returns:
         Execution result
     """
-    # Update state using create_deployment_state function
-    from data.State import create_deployment_state
+    print("\n" + "="*80)
+    print("🚀 EXECUTE TASK - 开始执行任务")
+    print(f"📝 任务描述: {task}")
+    print(f"📱 目标设备: {device}")
+    print("="*80 + "\n")
 
-    # Create new state
-    state = create_deployment_state(task=task, device=device)
+    if neo4j_db is None:
+        neo4j_db = db  # Use global db if not provided
 
-    # Use global db object
-    neo4j_db = neo4j_db or db
+    try:
+        from data.State import create_deployment_state
 
-    # Query database for all element nodes - using correct method name
-    all_elements = neo4j_db.get_all_actions()
-    if not all_elements:
-        print("⚠️ No element nodes in database, falling back to React mode")
-        state = fallback_to_react(state)
-        return {"status": state["execution_status"], "state": state}
+        # Create new state
+        print("🔄 正在初始化任务状态...")
+        state = create_deployment_state(task=task, device=device)
+        print("✅ 任务状态初始化完成")
 
-    # Query database for high-level actions related to the task
-    high_level_actions = neo4j_db.get_high_level_actions_for_task(task)
-    if high_level_actions:
-        print(
-            f"✓ Found {len(high_level_actions)} high-level actions related to the task"
-        )
+        # Use global db object
+        neo4j_db = neo4j_db or db
 
-        # Check for shortcut associations
-        shortcuts = check_shortcut_associations(state, high_level_actions)
+        # Query database for all element nodes
+        print("\n🔍 查询数据库获取所有元素节点...")
+        all_elements = neo4j_db.get_all_actions()
+        if not all_elements:
+            print("⚠️ 数据库中未找到元素节点，回退到React模式")
+            state = fallback_to_react(state)
+            return {"status": state["execution_status"], "state": state}
+        print(f"✅ 成功获取 {len(all_elements)} 个元素节点")
 
-        if shortcuts:
-            print(f"✓ Found {len(shortcuts)} possible shortcuts")
-
-            # Evaluate shortcut execution conditions
-            valid_shortcuts = evaluate_shortcut_execution(state, shortcuts)
-
-            if valid_shortcuts:
-                print(f"✓ {len(valid_shortcuts)} shortcuts meet execution conditions")
-
-                # Generate execution template
-                execution_template = generate_execution_template(state, valid_shortcuts)
-
-                if execution_template:
-                    print("✓ Generated execution template")
-
-                    # Sort shortcuts by priority
-                    prioritized_shortcuts = prioritize_shortcuts(state, valid_shortcuts)
-
-                    # Execute high-level operation
-                    result = execute_high_level_action(
-                        state, prioritized_shortcuts, execution_template
-                    )
-
-                    if result.get("status") == "success":
-                        print(
-                            f"✓ High-level operation executed successfully: {result.get('message', '')}"
-                        )
-                        state["execution_status"] = "success"
-                        state["completed"] = True
-                        return {"status": "success", "state": state}
-                    else:
-                        print(
-                            f"❌ High-level operation execution failed: {result.get('message', '')}"
-                        )
-                        # Fall back to React mode on failure
-                        state = fallback_to_react(state)
-                        return {"status": state["execution_status"], "state": state}
-        else:
-            # No shortcuts, try executing basic operation sequence
-            for action in high_level_actions:
-                action_sequence = action.get("action_sequence", [])
-                if not action_sequence:
-                    continue
-
-                # Capture and parse screen
-                state = capture_and_parse_screen(state)
-                if not state["current_page"]["screenshot"]:
-                    state["retry_count"] += 1
-                    if state["retry_count"] >= state["max_retries"]:
-                        print(
-                            f"❌ Failed to capture or parse screen {state['max_retries']} times in a row, falling back to React mode"
-                        )
-                        state = fallback_to_react(state)
-                        return {"status": state["execution_status"], "state": state}
-                    continue
-
-                # Reset retry count
-                state["retry_count"] = 0
-
-                # Match screen elements
-                element_matches = match_screen_elements(state, action_sequence)
-                if not element_matches:
-                    state["retry_count"] += 1
-                    if state["retry_count"] >= state["max_retries"]:
-                        print(
-                            f"❌ No matching elements found {state['max_retries']} times in a row, falling back to React mode"
-                        )
-                        state = fallback_to_react(state)
-                        return {"status": state["execution_status"], "state": state}
-                    continue
-
-                # Reset retry count
-                state["retry_count"] = 0
-
-                # Execute element action
-                best_match = element_matches[0]
-                success = execute_element_action(state, best_match)
-
-                if success:
-                    print(f"✓ Step {state['current_step']} executed successfully")
-
-                    # Update history
-                    state["history"].append(
-                        {
-                            "step": state["current_step"],
-                            "screenshot": state["current_page"]["screenshot"],
-                            "elements_json": state["current_page"]["elements_json"],
-                            "action": best_match.get("action_type", "tap"),
-                            "element_id": best_match.get("element_id", ""),
-                            "screen_element_id": best_match.get(
-                                "screen_element_id", -1
-                            ),
-                            "status": "success",
-                        }
-                    )
-
-                    # Update current step
-                    state["current_step"] += 1
-
-                    # Check if all steps are completed
-                    if state["current_step"] >= len(action_sequence):
-                        print("✓ All steps completed")
-                        state["execution_status"] = "success"
-                        state["completed"] = True
-                        return {"status": "success", "state": state}
+        # Query database for high-level actions related to the task
+        print(f"\n🔍 查询与任务相关的高级操作...")
+        high_level_actions = neo4j_db.get_high_level_actions_for_task(task)
+        
+        if high_level_actions:
+            print(f"✅ 找到 {len(high_level_actions)} 个与任务相关的高级操作")
+            
+            # 打印高级操作详情
+            for i, action in enumerate(high_level_actions, 1):
+                print(f"\n🔹 高级操作 {i}/{len(high_level_actions)}:")
+                print(f"   ID: {action.get('action_id', 'N/A')}")
+                print(f"   描述: {action.get('description', 'N/A')}")
+                print(f"   应用: {action.get('app_name', 'N/A')}")
+                print(f"   包名: {action.get('package_name', 'N/A')}")
+                
+                # 打印操作步骤
+                if 'action_sequence' in action and action['action_sequence']:
+                    print(f"   \n   操作步骤 ({len(action['action_sequence'])} 步):")
+                    for j, step in enumerate(action['action_sequence'], 1):
+                        print(f"   {j}. 类型: {step.get('type', 'N/A')}")
+                        print(f"      元素ID: {step.get('element_id', 'N/A')}")
+                        print(f"      描述: {step.get('description', 'N/A')}")
+                        if 'x' in step and 'y' in step:
+                            print(f"      坐标: ({step.get('x')}, {step.get('y')})")
+                        print()
                 else:
-                    print(f"❌ Step {state['current_step']} execution failed")
+                    print("   ❌ 没有找到操作步骤")
+                    
+                print("-" * 50)
 
-                    # Update history
-                    state["history"].append(
-                        {
-                            "step": state["current_step"],
+            # Check for shortcut associations
+            print("\n🔄 检查快捷方式关联...")
+            shortcuts = check_shortcut_associations(state, high_level_actions)
+
+            if shortcuts:
+                print(f"✅ 找到 {len(shortcuts)} 个可能的快捷方式")
+
+                # Evaluate shortcut execution conditions
+                print("\n🔍 评估快捷方式执行条件...")
+                valid_shortcuts = evaluate_shortcut_execution(state, shortcuts)
+
+                if valid_shortcuts:
+                    print(f"✅ 有 {len(valid_shortcuts)} 个快捷方式满足执行条件")
+
+                    # Generate execution template
+                    print("\n🔄 生成执行模板...")
+                    execution_template = generate_execution_template(state, valid_shortcuts)
+
+                    if execution_template:
+                        print("✅ 执行模板生成成功")
+
+                        # Sort shortcuts by priority
+                        print("\n📊 根据优先级排序快捷方式...")
+                        prioritized_shortcuts = prioritize_shortcuts(state, valid_shortcuts)
+                        print(f"  已排序 {len(prioritized_shortcuts)} 个快捷方式")
+
+                        # Execute high-level operation
+                        print("\n🚀 开始执行高级操作...")
+                        result = execute_high_level_action(
+                            state, prioritized_shortcuts, execution_template
+                        )
+
+                        if result.get("status") == "success":
+                            print(f"\n🎉 高级操作执行成功: {result.get('message', '')}")
+                            state["execution_status"] = "success"
+                            state["completed"] = True
+                            return {"status": "success", "state": state}
+                        else:
+                            error_msg = result.get('message', '未知错误')
+                            print(f"\n❌ 高级操作执行失败: {error_msg}")
+                            # Fall back to React mode on failure
+                            print("\n🔄 回退到React模式...")
+                            state = fallback_to_react(state)
+                            return {
+                                "status": state["execution_status"],
+                                "state": state,
+                                "error": error_msg
+                            }
+            else:
+                print("ℹ️ 未找到可用的快捷方式，尝试执行基本操作序列")
+                
+                # No shortcuts, try executing basic operation sequence
+                for action in high_level_actions:
+                    action_sequence = action.get("action_sequence", [])
+                    if not action_sequence:
+                        print("⚠️ 操作序列为空，跳过")
+                        continue
+
+                    print(f"\n📋 执行操作序列 (共 {len(action_sequence)} 步)")
+                    
+                    # Capture and parse screen
+                    print("\n📸 捕获并解析屏幕...")
+                    state = capture_and_parse_screen(state)
+                    if not state["current_page"]["screenshot"]:
+                        state["retry_count"] += 1
+                        print(f"⚠️ 第 {state['retry_count']} 次尝试捕获/解析屏幕失败")
+                        
+                        if state["retry_count"] >= state["max_retries"]:
+                            print(f"❌ 连续 {state['max_retries']} 次捕获/解析屏幕失败，回退到React模式")
+                            state = fallback_to_react(state)
+                            return {
+                                "status": state["execution_status"],
+                                "state": state,
+                                "error": "Failed to capture/parse screen"
+                            }
+                        continue
+
+                    # Reset retry count
+                    state["retry_count"] = 0
+                    print("✅ 屏幕捕获并解析成功")
+
+                    # Match screen elements
+                    print(f"\n🔍 匹配屏幕元素 (步骤 {state['current_step'] + 1}/{len(action_sequence)})...")
+                    element_matches = match_screen_elements(state, action_sequence)
+                    
+                    if not element_matches:
+                        state["retry_count"] += 1
+                        print(f"⚠️ 第 {state['retry_count']} 次尝试匹配元素失败")
+                        
+                        if state["retry_count"] >= state["max_retries"]:
+                            print(f"❌ 连续 {state['max_retries']} 次未找到匹配元素，回退到React模式")
+                            state = fallback_to_react(state)
+                            return {
+                                "status": state["execution_status"],
+                                "state": state,
+                                "error": "No matching elements found"
+                            }
+                        continue
+
+                    # Reset retry count
+                    state["retry_count"] = 0
+                    print(f"✅ 找到 {len(element_matches)} 个匹配的元素")
+
+                    # Execute element action
+                    best_match = element_matches[0]
+                    current_step = state["current_step"]
+                    
+                    print("\n" + "="*80)
+                    print(f"🔄 准备执行步骤 {current_step + 1}/{len(action_sequence)} - 元素操作")
+                    print("🔍 匹配到的元素详情:")
+                    print(f"  元素ID: {best_match.get('element_id', 'N/A')}")
+                    print(f"  屏幕元素ID: {best_match.get('screen_element_id', 'N/A')}")
+                    print(f"  操作类型: {best_match.get('action_type', 'tap')}")
+                    print(f"  元素位置: {best_match.get('position', 'N/A')}")
+                    print(f"  元素内容: {best_match.get('content', 'N/A')}")
+                    
+                    # 添加操作前延迟
+                    action_delay = state.get("action_delay", 1.0)
+                    print(f"⏳ 等待 {action_delay} 秒后执行操作...")
+                    time.sleep(action_delay)
+                    
+                    print("\n" + "="*50)
+                    print("🔵 准备执行元素操作")
+                    print(f"🔵 当前步骤: {current_step + 1}/{len(action_sequence)}")
+                    print(f"🔵 匹配到的元素: {json.dumps(best_match, indent=2, ensure_ascii=False, default=str)}")
+                    
+                    # 检查页面元素数据
+                    if "current_page" not in state or "elements_data" not in state["current_page"]:
+                        print("❌ 错误: 页面元素数据缺失")
+                        return state
+                        
+                    elements_data = state["current_page"]["elements_data"]
+                    print(f"🔵 当前页面元素数量: {len(elements_data)}")
+                    
+                    # 验证屏幕元素ID
+                    screen_element_id = best_match.get("screen_element_id")
+                    if not isinstance(screen_element_id, int) or screen_element_id < 0 or screen_element_id >= len(elements_data):
+                        print(f"❌ 错误: 无效的屏幕元素ID: {screen_element_id}")
+                        print(f"❌ 有效范围: 0-{len(elements_data)-1}")
+                        return state
+                    
+                    # 获取目标元素信息
+                    target_element = elements_data[screen_element_id]
+                    print(f"🔵 目标元素信息: {json.dumps(target_element, indent=2, ensure_ascii=False, default=str)}")
+                    
+                    # 记录调用前状态
+                    prev_elements_count = len(elements_data)
+                    print(f"🔵 调用前页面元素数量: {prev_elements_count}")
+                    
+                    # 记录开始时间
+                    start_time = time.time()
+                    
+                    print("\n" + "="*50)
+                    print("🔄 开始执行元素操作...")
+                    print(f"🔍 调用 execute_element_action")
+                    print(f"  参数 - state.keys(): {list(state.keys())}")
+                    print(f"  参数 - best_match: {json.dumps(best_match, indent=2, ensure_ascii=False, default=str)}")
+                    
+                    # 执行元素操作
+                    success = execute_element_action(state, best_match)
+                    
+                    # 记录耗时
+                    execution_time = time.time() - start_time
+                    
+                    print(f"\n✅ execute_element_action 执行完成")
+                    print(f"  返回值: {success} (类型: {type(success)})")
+                    print(f"  执行耗时: {execution_time:.2f}秒")
+                    print(f"  调用后页面元素数量: {len(state['current_page'].get('elements_data', []))}")
+                    print("="*80 + "\n")
+
+                    if success:
+                        print(f"\n✅ 步骤 {current_step + 1} 执行成功")
+                        
+                        # Update history before incrementing step
+                        history_entry = {
+                            "step": current_step + 1,
                             "screenshot": state["current_page"]["screenshot"],
                             "elements_json": state["current_page"]["elements_json"],
                             "action": best_match.get("action_type", "tap"),
                             "element_id": best_match.get("element_id", ""),
-                            "screen_element_id": best_match.get(
-                                "screen_element_id", -1
-                            ),
-                            "status": "error",
+                            "screen_element_id": best_match.get("screen_element_id", -1),
+                            "status": "success",
+                            "timestamp": time.time()
                         }
-                    )
+                        state["history"].append(history_entry)
+                        print(f"📝 已更新历史记录 (总历史记录数: {len(state['history'])})")
 
-                    # Increment retry count
-                    state["retry_count"] += 1
-                    if state["retry_count"] >= state["max_retries"]:
-                        print(
-                            f"❌ Operation failed {state['max_retries']} times in a row, falling back to React mode"
-                        )
-                        state = fallback_to_react(state)
-                        return {"status": state["execution_status"], "state": state}
-    else:
-        print("❌ No matching high-level actions found, falling back to React mode")
+                        # Update current step after successful execution
+                        state["current_step"] = current_step + 1
+                        state["retry_count"] = 0  # Reset retry count on success
+                        print(f"📊 当前进度: {state['current_step']}/{len(action_sequence)}")
+
+                        # Add delay between actions
+                        time.sleep(1)  # 1 second delay between actions
+
+                        # Check if all steps are completed
+                        if state["current_step"] >= len(action_sequence):
+                            print("\n🎉 所有步骤执行完成！")
+                            state["execution_status"] = "success"
+                            state["completed"] = True
+                            return {
+                                "status": "success",
+                                "state": state,
+                                "message": "All steps completed successfully"
+                            }
+                            
+                        # 继续执行下一步
+                        continue
+                    else:
+                        current_step = state["current_step"]
+                        print(f"\n❌ 步骤 {current_step + 1} 执行失败")
+
+                        # Update history
+                        history_entry = {
+                            "step": current_step + 1,
+                            "screenshot": state["current_page"]["screenshot"],
+                            "elements_json": state["current_page"]["elements_json"],
+                            "action": best_match.get("action_type", "tap"),
+                            "element_id": best_match.get("element_id", ""),
+                            "screen_element_id": best_match.get("screen_element_id", -1),
+                            "status": "error",
+                            "retry_count": state.get("retry_count", 0) + 1,
+                            "timestamp": time.time()
+                        }
+                        state["history"].append(history_entry)
+                        print(f"📝 已更新历史记录 (总历史记录数: {len(state['history'])})")
+
+                        # Increment retry count
+                        state["retry_count"] = state.get("retry_count", 0) + 1
+                        print(f"🔄 重试计数: {state['retry_count']}/{state['max_retries']}")
+                        
+                        if state["retry_count"] >= state["max_retries"]:
+                            print(f"\n❌ 操作连续失败 {state['max_retries']} 次，回退到React模式")
+                            state = fallback_to_react(state)
+                            return {
+                                "status": state["execution_status"],
+                                "state": state,
+                                "error": f"Operation failed after {state['max_retries']} retries"
+                            }
+                        
+                        # 添加重试延迟，随着重试次数增加而增加
+                        retry_delay = min(5, 1 * (state["retry_count"] + 1))  # 最大5秒
+                        print(f"⏳ 等待 {retry_delay} 秒后重试...")
+                        time.sleep(retry_delay)
+                        
+                        # 重新捕获屏幕以获取最新状态
+                        print("🔄 重新捕获屏幕以获取最新状态...")
+                        state = capture_and_parse_screen(state)
+                        if not state["current_page"]["screenshot"]:
+                            print("❌ 重新捕获屏幕失败，无法继续重试")
+                            state = fallback_to_react(state)
+                            return {
+                                "status": state["execution_status"],
+                                "state": state,
+                                "error": "Failed to recapture screen for retry"
+                            }
+        else:
+            print("❌ 未找到与任务匹配的高级操作，回退到React模式")
+            state = fallback_to_react(state)
+            return {
+                "status": state["execution_status"],
+                "state": state,
+                "error": "No matching high-level actions found"
+            }
+
+        # If all above methods fail, fall back to React mode
+        print("\n⚠️ 无法使用高级操作完成任务，回退到基本操作空间")
         state = fallback_to_react(state)
-        return {"status": state["execution_status"], "state": state}
-
-    # If all above methods fail, fall back to React mode
-    print(
-        "⚠️ Unable to complete task with high-level operations, falling back to basic operation space"
-    )
-    state = fallback_to_react(state)
-    return {"status": state["execution_status"], "state": state}
+        return {
+            "status": state["execution_status"],
+            "state": state,
+            "error": "All execution methods failed"
+        }
+        
+    except Exception as e:
+        import traceback
+        print("\n" + "❌" * 20 + " 未捕获的异常 " + "❌" * 20)
+        print(f"错误类型: {type(e).__name__}")
+        print(f"错误信息: {str(e)}")
+        print("\n堆栈跟踪:")
+        traceback.print_exc()
+        print("❌" * 50 + "\n")
+        
+        # 确保状态被正确更新
+        state["execution_status"] = "error"
+        state["error"] = f"Unhandled exception: {str(e)}"
+        
+        # 尝试回退到React模式
+        try:
+            state = fallback_to_react(state)
+        except Exception as fallback_error:
+            print(f"❌ 回退到React模式时出错: {str(fallback_error)}")
+        
+        return {
+            "status": "error",
+            "state": state,
+            "error": f"Unhandled exception: {str(e)}",
+            "traceback": traceback.format_exc()
+        }
 
 
 def run_task(task: str, device: str = "emulator-5554") -> Dict[str, Any]:

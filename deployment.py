@@ -1,7 +1,7 @@
 import json
 import time
 import uuid
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.messages import HumanMessage, SystemMessage
@@ -691,6 +691,74 @@ def debug_print(*args, **kwargs):
     print("="*80 + "\n")
 
 
+def execute_multi_step_action(
+    state: DeploymentState,
+    execution_template: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    智能多步剧本执行器：每一步都做视觉/语义相似度匹配后再执行动作，适用于无shortcut但有高阶业务流程剧本的分支。
+
+    Args:
+        state: 当前执行状态
+        execution_template: LLM/AI生成的多步剧本模板
+
+    Returns:
+        执行结果字典，包含status和message
+    """
+    print("\n" + "="*80)
+    print("🚀 EXECUTE MULTI-STEP ACTION - 智能多步剧本执行")
+    if not execution_template or "steps" not in execution_template:
+        error_msg = "❌ Invalid execution template: missing steps"
+        print(error_msg)
+        return {"status": "error", "message": error_msg}
+    steps = execution_template["steps"]
+    if not steps or not isinstance(steps, list):
+        print("❌ No valid steps in execution template")
+        return {"status": "error", "message": "No valid steps in execution template"}
+    # 初始化执行状态
+    state["current_step"] = 0
+    state["total_steps"] = len(steps)
+    state["execution_status"] = "running"
+    state["history"] = []
+    print(f"智能多步剧本共 {state['total_steps']} 步")
+    # 循环每一步
+    while state["current_step"] < state["total_steps"]:
+        current_step_idx = state["current_step"]
+        step = steps[current_step_idx]
+        print(f"\n[MultiStep] 执行第 {current_step_idx+1}/{state['total_steps']} 步: {json.dumps(step, ensure_ascii=False)}")
+        # 1. 截屏并解析页面，获取最新元素
+        state = capture_and_parse_screen(state)
+        if not state["current_page"].get("elements_data"):
+            print("❌ 当前屏幕元素解析失败，无法继续")
+            return {"status": "error", "message": "Screen parse failed"}
+        # 2. 做视觉/语义相似度匹配（核心区别于shortcut分支）
+        match_results = match_screen_elements(state, steps)
+        if not match_results:
+            print("❌ 视觉/语义匹配失败，尝试 fallback")
+            match_results = fallback_to_semantic_match(state, steps)
+        if not match_results:
+            print("❌ fallback 也未能匹配到元素，终止执行")
+            return {"status": "error", "message": "Element match failed"}
+        # 3. 取最佳匹配结果，执行动作
+        best_match = match_results[0]
+        print(f"[MultiStep] 匹配结果: {json.dumps(best_match, ensure_ascii=False)}")
+        success = execute_element_action(state, best_match)
+        # 4. 记录历史并判断是否继续
+        state["history"].append({
+            "step": current_step_idx,
+            "step_info": step,
+            "match": best_match,
+            "success": success
+        })
+        if success:
+            print(f"✅ 第 {current_step_idx+1} 步执行成功")
+            state["current_step"] += 1
+        else:
+            print(f"❌ 第 {current_step_idx+1} 步执行失败，终止多步剧本")
+            return {"status": "error", "message": f"Step {current_step_idx+1} failed"}
+    print(f"\n🎉 智能多步剧本全部 {state['total_steps']} 步执行完成！")
+    return {"status": "success", "message": "All steps executed"}
+
 def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]) -> bool:
     """
     Execute screen element action
@@ -765,8 +833,20 @@ def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]
             return False
             
         # 记录操作详情
-        action_type = element_match.get("action_type", "tap").upper()
-        print(f"\n🎯 准备执行 {action_type} 操作:")
+        original_action_type = element_match.get("action_type", "tap")
+        action_type = standardize_action_type(original_action_type)
+        
+        # 记录标准化信息
+        if original_action_type.lower() != action_type:
+            print(f"\n🔄 操作类型已标准化: '{original_action_type}' -> '{action_type}'")
+        
+        # 验证操作类型是否有效
+        valid_actions = ["tap", "text", "swipe", "long_press", "back", "home", "menu", "volume_up", "volume_down", "power"]
+        if action_type not in valid_actions:
+            print(f"❌ 错误: 不支持的操作类型 '{action_type}'，有效类型为: {', '.join(valid_actions)}")
+            return False
+            
+        print(f"\n🎯 准备执行 {action_type.upper()} 操作:")
         print(f"  - 元素ID: {element_match.get('element_id', 'N/A')}")
         print(f"  - 元素类型: {element_match.get('element_type', 'N/A')}")
         print(f"  - 元素内容: {element_match.get('element_content', 'N/A')}")
@@ -925,7 +1005,8 @@ def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]
         # 根据操作类型添加特定参数
         print("\n🔧 设置操作特定参数...")
         if action_type == "text":
-            text = element_match.get('parameters', {}).get("text", "")
+            # 从action_params中获取text_input参数，因为它已经从element_match.parameters中复制过来了
+            text = action_params.get("text_input", "")
             action_params["input_str"] = text
             print(f"  ⌨️ 文本输入: '{text}'")
         elif action_type == "long_press":
@@ -1848,6 +1929,65 @@ If no shortcuts meet conditions, return an empty list.
         return []
 
 
+def standardize_action_type(action_type: str) -> str:
+    """
+    Standardize action type to a known set of values.
+    
+    Args:
+        action_type: The action type to standardize
+        
+    Returns:
+        Standardized action type (tap, text, swipe, long_press, back)
+    """
+    if not action_type:
+        return "unknown"
+    
+    action_type = str(action_type).strip().lower()
+    
+    # Map variations to standard types
+    type_mapping = {
+        # Text input variations
+        "type": "text",
+        "input": "text",
+        "text_input": "text",
+        "enter_text": "text",
+        "keyboard": "text",
+        
+        # Tap variations
+        "tap": "tap",
+        "click": "tap",
+        "press": "tap",
+        "select": "tap",
+        "choose": "tap",
+        
+        # Swipe variations
+        "swipe": "swipe",
+        "scroll": "swipe",
+        "drag": "swipe",
+        "slide": "swipe",
+        
+        # Long press variations
+        "long_press": "long_press",
+        "longpress": "long_press",
+        "long-press": "long_press",
+        "hold": "long_press",
+        
+        # Back navigation
+        "back": "back",
+        "return": "back",
+        "go_back": "back",
+        
+        # Other common actions
+        "home": "home",
+        "menu": "menu",
+        "volume_up": "volume_up",
+        "volume_down": "volume_down",
+        "power": "power"
+    }
+    
+    return type_mapping.get(action_type, "unknown")
+
+
 def generate_execution_template(
     state: DeploymentState, shortcuts: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -1861,7 +2001,9 @@ def generate_execution_template(
     Returns:
         Execution template with operation steps and parameters
     """
-    print("📝 Generating execution template...")
+    print("\n" + "="*80)
+    print("📝 开始生成执行模板...")
+    print("="*80)
 
     if not shortcuts:
         print("⚠️ No available shortcuts, cannot generate execution template")
@@ -1964,19 +2106,55 @@ Ensure each step has a clear operation target and necessary parameters. If the o
         # Execute generation
         result = template_chain.invoke(template_input)
 
-        # Validate result
-        if (
-            "steps" in result
-            and isinstance(result["steps"], list)
-            and len(result["steps"]) > 0
-        ):
-            print(
-                f"✓ Successfully generated execution template with {len(result['steps'])} steps"
-            )
-            return result
-        else:
-            print("❌ Generated execution template is invalid")
+        # Validate and standardize the result
+        if not isinstance(result, dict) or "steps" not in result or not isinstance(result["steps"], list):
+            print("❌ 生成的执行模板格式无效: 缺少 steps 字段或格式不正确")
             return {}
+            
+        if not result["steps"]:
+            print("❌ 生成的执行模板为空")
+            return {}
+            
+        # Process and standardize each step
+        validated_steps = []
+        for i, step in enumerate(result["steps"], 1):
+            if not isinstance(step, dict):
+                print(f"⚠️ 步骤 {i} 格式无效，已跳过: {step}")
+                continue
+                
+            # Standardize action_type
+            original_action_type = step.get("action_type", "").strip()
+            standardized_type = standardize_action_type(original_action_type)
+            
+            # Log if the type was changed
+            if original_action_type and original_action_type.lower() != standardized_type:
+                print(f"  🔄 标准化 action_type: '{original_action_type}' -> '{standardized_type}'")
+            
+            # Validate required fields
+            if "target_element_id" not in step and "parameters" not in step:
+                print(f"⚠️ 步骤 {i} 缺少必要字段 (target_element_id 或 parameters)，已跳过")
+                continue
+                
+            # Create standardized step
+            validated_step = {
+                "action_type": standardized_type,
+                **step  # Include all original fields
+            }
+            
+            # Ensure parameters exist
+            if "parameters" not in validated_step:
+                validated_step["parameters"] = {}
+                
+            validated_steps.append(validated_step)
+            
+        if not validated_steps:
+            print("❌ 所有步骤都无效，无法生成执行模板")
+            return {}
+            
+        print(f"\n✅ 成功生成执行模板，共 {len(validated_steps)} 个步骤")
+        print("="*80 + "\n")
+        
+        return {"steps": validated_steps}
 
     except Exception as e:
         print(f"❌ Error generating execution template: {str(e)}")
@@ -2580,31 +2758,26 @@ def generate_template_node(state: DeploymentState) -> DeploymentState:
 
     return state
 
-
 def execute_action_node(state: DeploymentState) -> DeploymentState:
     """
     Execute operation
     """
     print("\n" + "="*80)
-    print("🚀 EXECUTE ACTION NODE - 开始执行操作")
+    print("🚀 EXECUTE_ACTION_NODE - 开始执行操作节点")
+    print(f"  - 当前步骤: {state.get('current_step', 0)}/{state.get('total_steps', 0)}")
+    print(f"  - 任务: {state.get('task', 'N/A')}")
     print(f"  - should_execute_shortcut: {state.get('should_execute_shortcut')}")
-    print(f"  - has execution_template: {'execution_template' in state and state['execution_template']}")
+    print(f"  - has execution_template: {bool(state.get('execution_template'))}")
     print(f"  - has matched_elements: {bool(state.get('matched_elements'))}")
-    if state.get('matched_elements'):
-        print(f"  - Matched elements count: {len(state['matched_elements'])}")
-        for i, match in enumerate(state['matched_elements'], 1):
-            print(f"    {i}. ID: {match.get('screen_element_id')}, "
-                  f"Action: {match.get('action_type')}, "
-                  f"Score: {match.get('match_score', 0):.4f}")
     print("="*80 + "\n")
     
     state_dict = dict(state)
 
-    if state.get("should_execute_shortcut") and state.get("execution_template"):
-        print("🚀 Executing high-level operation...")
-        print(f"  - Shortcut: {state.get('current_shortcut', {}).get('name', 'Unknown')}")
-        print(f"  - Template steps: {len(state['execution_template'].get('steps', []))}")
-        
+    if state["should_execute_shortcut"] and state["execution_template"]:
+        print("\n📌 分支: 执行 SHORTCUT 高阶操作")
+        print(f"   - 当前 shortcut: {state.get('current_shortcut', {}).get('name', 'Unknown')}")
+        print(f"   - 剧本步骤数: {len(state['execution_template'].get('steps', []))}")
+        print("🚀 开始执行 shortcut 高阶操作...")
         # Call execute_high_level_action function
         result = execute_high_level_action(
             state_dict, state["associated_shortcuts"], state["execution_template"]
@@ -2628,33 +2801,25 @@ def execute_action_node(state: DeploymentState) -> DeploymentState:
             )
             # Mark for fallback on failure
             state["should_fallback"] = True
-    
-    # Handle case where we have matched elements but no shortcut execution
-    elif state.get("matched_elements"):
-        print("🎯 Executing matched elements...")
-        success = True
-        
-        for element_match in state["matched_elements"]:
-            print(f"  - Executing action on element {element_match.get('screen_element_id')} "
-                  f"(score: {element_match.get('match_score', 0):.4f})")
-            
-            # Execute the action on the matched element
-            element_success = execute_element_action(state_dict, element_match)
-            
-            if not element_success:
-                print(f"❌ Failed to execute action on element {element_match.get('screen_element_id')}")
-                success = False
-                state["should_fallback"] = True
-                break
-        
-        if success:
-            print("✅ Successfully executed all matched elements")
+    elif state.get("execution_template") and not state.get("should_execute_shortcut"):
+        print("\n📌 分支: 执行智能多步剧本 (无 shortcut)")
+        print(f"   - 当前步骤: {state.get('current_step', 0)+1}/{state.get('total_steps', '?')}")
+        print(f"   - 剧本步骤数: {len(state['execution_template'].get('steps', []))}")
+        print("🚀 开始执行智能多步业务流程...")
+        result = execute_multi_step_action(state, state["execution_template"])
+        if result["status"] == "success":
+            print("✨ 智能多步业务流程执行成功！")
             state["execution_status"] = "success"
             state["completed"] = True
-    
-    # Fall back to task matching if no matched elements
+            if "history" in result:
+                state["history"] = result["history"]
+        else:
+            print(f"❌ 智能多步业务流程执行失败: {result.get('message', '')}")
+            state["should_fallback"] = True
     else:
-        print("📝 Attempting to match task with high-level actions...")
+        print("\n📌 分支: 尝试匹配任务到高阶动作")
+        print(f"   - 当前任务: {state.get('task', 'N/A')}")
+        print("📝 正在尝试将任务匹配到高阶动作...")
         # Call match_task_to_action function
         is_matched, matched_action = match_task_to_action(state_dict, state["task"])
 
@@ -2695,8 +2860,13 @@ def execute_action_node(state: DeploymentState) -> DeploymentState:
             )
             state["should_fallback"] = True
 
+    # 添加函数结束日志
+    print("\n✅ EXECUTE_ACTION_NODE 执行完成")
+    print(f"  - 执行状态: {state.get('execution_status', 'unknown')}")
+    print(f"  - 是否完成: {state.get('completed', False)}")
+    print(f"  - 需要回退: {state.get('should_fallback', False)}")
+    print("="*80 + "\n")
     return state
-
 
 def fallback_node(state: DeploymentState) -> DeploymentState:
     """
@@ -2816,14 +2986,15 @@ def check_task_completion(state: DeploymentState) -> DeploymentState:
     Returns:
         Updated execution state with task completion status
     """
-    # Skip judgment if too few steps
-    if state["current_step"] < 2:
-        return state
+    try:
+        # Skip judgment if too few steps
+        if state["current_step"] < 2:
+            return state
 
-    print("🔍 Evaluating if task is completed...")
+        print("🔍 Evaluating if task is completed...")
 
-    # Get task description
-    task = state["task"]
+        # Get task description
+        task = state["task"]
 
     # Step 1: Generate task completion criteria
     completion_prompt = ChatPromptTemplate.from_messages(
@@ -2889,8 +3060,13 @@ def check_task_completion(state: DeploymentState) -> DeploymentState:
         ]
     )
 
+    # Format the prompt template to get actual message instances
+    formatted_messages = judgement_prompt.format_messages(
+        completion_criteria=completion_criteria
+    )
+    
     # Combine all messages
-    all_messages = list(judgement_prompt.messages) + image_messages
+    all_messages = formatted_messages + image_messages
 
     # Call LLM for judgment
     judgement_response = model.invoke(all_messages)
@@ -2917,4 +3093,19 @@ def check_task_completion(state: DeploymentState) -> DeploymentState:
         }
     )
 
-    return state
+        return state
+    
+    except Exception as e:
+        print(f"❌ Error executing task: {str(e)}")
+        # Set task as not completed on error
+        state["completed"] = False  
+        state["execution_status"] = "error"
+        # Add error to history
+        state["history"].append({
+            "step": state["current_step"],
+            "action": "task_completion_check_error",
+            "error": str(e),
+            "status": "error",
+            "completed": False,
+        })
+        return state

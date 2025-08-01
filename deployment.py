@@ -1164,7 +1164,7 @@ def execute_element_action(state: DeploymentState, element_match: Dict[str, Any]
             print("\n堆栈跟踪:")
             traceback.print_exc()
             return False
-
+            
     except Exception as e:
         import traceback
         print(f"\n❌❌❌ 执行元素操作时发生未捕获的异常 ❌❌❌")
@@ -2074,13 +2074,12 @@ Ensure each step has a clear operation target and necessary parameters. If the o
 
     # Add action sequence information
     action_sequence = selected_shortcut.get("action_sequence", [])
-    if action_sequence:
+    if isinstance(action_sequence, list):
         shortcut_info += "Action sequence:\n"
-        if isinstance(action_sequence, list):
-            for i, action in enumerate(action_sequence):
-                shortcut_info += f"  {i+1}. {json.dumps(action, ensure_ascii=False)}\n"
-        elif isinstance(action_sequence, str):
-            shortcut_info += f"  {action_sequence}\n"
+        for i, action in enumerate(action_sequence):
+            shortcut_info += f"  {i+1}. {json.dumps(action, ensure_ascii=False)}\n"
+    elif isinstance(action_sequence, str):
+        shortcut_info += f"  {action_sequence}\n"
 
     # Add evaluation information
     evaluation = selected_shortcut.get("evaluation", {})
@@ -2186,7 +2185,7 @@ def prioritize_shortcuts(
             # Default sort by match score
             return sorted(
                 shortcuts,
-                key=lambda x: x["element_match"].get("match_score", 0),
+                key=lambda x: x.get("element_match").get("match_score", 0),
                 reverse=True,
             )
 
@@ -2396,8 +2395,8 @@ def execute_high_level_action(
         action_params = {
             "device": state["device"],
             "action": action_type,
-            "x": center_x,
-            "y": center_y,
+            "x": center_x,  # 添加 x 坐标
+            "y": center_y,  # 添加 y 坐标
         }
 
         # Add specific parameters based on action type
@@ -2601,6 +2600,7 @@ def match_elements_node(state: DeploymentState) -> DeploymentState:
             print(
                 f"✓ Task matched to high-level action: {matched_action.get('name', 'Unknown')}"
             )
+
             # Save current executing high-level action
             state["current_action"] = matched_action
 
@@ -2772,6 +2772,18 @@ def execute_action_node(state: DeploymentState) -> DeploymentState:
     print("="*80 + "\n")
     
     state_dict = dict(state)
+
+    # 添加简洁日志，帮助调试进入智能多步剧本分支的条件
+    print(f"DEBUG: execution_template keys: {list(state.get('execution_template', {}).keys()) if state.get('execution_template') else 'None'}")
+    print(f"DEBUG: should_execute_shortcut: {state.get('should_execute_shortcut')}")
+    print(f"DEBUG: shortcuts count: {len(state.get('shortcuts', []))}")
+    print(f"DEBUG: matched_elements count: {len(state.get('matched_elements', [])) if state.get('matched_elements') else 0}")
+    print(f"DEBUG: current_step: {state.get('current_step')}")
+    print(f"DEBUG: total_steps: {state.get('total_steps')}")
+    print(f"DEBUG: execution_status: {state.get('execution_status')}")
+    print(f"DEBUG: completed: {state.get('completed')}")
+    print(f"DEBUG: should_fallback: {state.get('should_fallback')}")
+    print(f"DEBUG: task: {state.get('task')}")
 
     if state["should_execute_shortcut"] and state["execution_template"]:
         print("\n📌 分支: 执行 SHORTCUT 高阶操作")
@@ -2986,15 +2998,14 @@ def check_task_completion(state: DeploymentState) -> DeploymentState:
     Returns:
         Updated execution state with task completion status
     """
-    try:
-        # Skip judgment if too few steps
-        if state["current_step"] < 2:
-            return state
+    # Skip judgment if too few steps
+    if state["current_step"] < 2:
+        return state
 
-        print("🔍 Evaluating if task is completed...")
+    print("🔍 Evaluating if task is completed...")
 
-        # Get task description
-        task = state["task"]
+    # Get task description
+    task = state["task"]
 
     # Step 1: Generate task completion criteria
     completion_prompt = ChatPromptTemplate.from_messages(
@@ -3032,14 +3043,15 @@ def check_task_completion(state: DeploymentState) -> DeploymentState:
     for idx, img_path in enumerate(recent_screenshots, start=1):
         if os.path.exists(img_path):
             with open(img_path, "rb") as f:
-                img_data = base64.b64encode(f.read()).decode("utf-8")
+                img_data = f.read()
+                img_data_base64 = base64.b64encode(img_data).decode("utf-8")
             image_messages.append(
                 HumanMessage(
                     content=[
                         {"type": "text", "text": f"Here is data for screenshot {idx}:"},
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{img_data}"},
+                            "image_url": {"url": f"data:image/jpeg;base64,{img_data_base64}"},
                         },
                     ]
                 )
@@ -3060,13 +3072,8 @@ def check_task_completion(state: DeploymentState) -> DeploymentState:
         ]
     )
 
-    # Format the prompt template to get actual message instances
-    formatted_messages = judgement_prompt.format_messages(
-        completion_criteria=completion_criteria
-    )
-    
     # Combine all messages
-    all_messages = formatted_messages + image_messages
+    all_messages = list(judgement_prompt.messages) + image_messages
 
     # Call LLM for judgment
     judgement_response = model.invoke(all_messages)
@@ -3093,19 +3100,4 @@ def check_task_completion(state: DeploymentState) -> DeploymentState:
         }
     )
 
-        return state
-    
-    except Exception as e:
-        print(f"❌ Error executing task: {str(e)}")
-        # Set task as not completed on error
-        state["completed"] = False  
-        state["execution_status"] = "error"
-        # Add error to history
-        state["history"].append({
-            "step": state["current_step"],
-            "action": "task_completion_check_error",
-            "error": str(e),
-            "status": "error",
-            "completed": False,
-        })
-        return state
+    return state
